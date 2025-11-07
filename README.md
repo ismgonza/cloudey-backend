@@ -309,8 +309,8 @@ erDiagram
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/your-org/cloudey.git
-cd cloudey/backend
+git clone https://github.com/ismgonza/cloudey-backend.git
+cd cloudey-backend
 ```
 
 ### 2. Install UV (Python Package Manager)
@@ -1263,9 +1263,8 @@ Proprietary - All rights reserved
 ## 👥 Support
 
 For questions or issues:
-- **Email**: support@cloudey.app
-- **Docs**: https://docs.cloudey.app
-- **Issues**: https://github.com/your-org/cloudey/issues
+- **Email**: isma@gonrod.com
+- **Issues**: https://github.com/ismgonza/cloudey-backend/issues
 
 ---
 
