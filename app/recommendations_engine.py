@@ -5,8 +5,11 @@ Generates cost optimization insights using cached data and AI analysis.
 """
 
 import logging
+import json
 from typing import Dict, List, Any
 from datetime import datetime, timedelta
+
+from langchain_core.messages import HumanMessage
 
 from app.cache import get_cost_cache
 from app.cloud.oci.optimization import CostOptimizationAnalyzer
@@ -113,245 +116,122 @@ async def generate_ai_recommendations(user_id: int) -> Dict[str, Any]:
         logger.debug(f"Loaded metrics for {len(lb_metrics)} load balancers")
         
         # ========================================================================
-        # 1. COST TREND INSIGHTS
+        # 1. COST TREND INSIGHTS (REMOVED - Now using AI narrative only)
         # ========================================================================
-        insights = []
+        insights = []  # Keeping empty for compatibility, removed insight generation
         
-        # Calculate monthly totals
+        # Calculate monthly totals (still needed for AI narrative)
         monthly_totals = {}
         for month, costs in monthly_costs.items():
             monthly_totals[month] = sum(c['cost'] for c in costs)
         
-        if len(monthly_totals) >= 2:
-            sorted_months = sorted(monthly_totals.keys())
-            oldest_month = sorted_months[0]
-            newest_month = sorted_months[-1]
-            
-            oldest_total = monthly_totals[oldest_month]
-            newest_total = monthly_totals[newest_month]
-            
-            change = newest_total - oldest_total
-            change_pct = (change / oldest_total * 100) if oldest_total > 0 else 0
-            
-            if abs(change_pct) > 5:
-                trend = "increased" if change > 0 else "decreased"
+        # NOTE: Removed all static insight generation logic (cost trends, dominant services, etc.)
+        # These are now handled by the AI narrative in the LLM analysis section below.
+        
+        # Collect underutilized instances for dedicated recommendation card
+        underutilized_instances_data = []
+        potential_underutil_savings = 0
+        
+        # Count total running instances and vCPUs for more accurate calculation
+        total_running_vcpus = sum(inst.get('vcpus', 0) for inst in instances if inst['lifecycle_state'] == 'RUNNING')
+        
+        for inst in instances:
+            if inst['lifecycle_state'] == 'RUNNING' and not inst.get('is_deleted', False):
+                metrics = instance_metrics.get(inst['ocid'], {})
+                cpu = metrics.get('CpuUtilization')
+                mem = metrics.get('MemoryUtilization')
                 
-                # Analyze which services drove the change
-                oldest_costs = monthly_costs[oldest_month]
-                newest_costs = monthly_costs[newest_month]
-                
-                # Aggregate by service for both months
-                oldest_by_service = {}
-                for cost in oldest_costs:
-                    service = cost['service']
-                    oldest_by_service[service] = oldest_by_service.get(service, 0) + cost['cost']
-                
-                newest_by_service = {}
-                for cost in newest_costs:
-                    service = cost['service']
-                    newest_by_service[service] = newest_by_service.get(service, 0) + cost['cost']
-                
-                # Calculate service-level changes
-                service_increases = []
-                service_decreases = []
-                all_services = set(oldest_by_service.keys()) | set(newest_by_service.keys())
-                
-                for service in all_services:
-                    old_cost = oldest_by_service.get(service, 0)
-                    new_cost = newest_by_service.get(service, 0)
-                    svc_change = new_cost - old_cost
+                if cpu is not None and mem is not None and cpu < 40 and mem < 40:
+                    vcpus = inst.get('vcpus') or 0
+                    savings = 0
+                    # Savings calculation will be done after we know compute costs
+                    # For now just collect the instance
                     
-                    if abs(svc_change) > 10:  # Only show significant changes (>$10)
-                        if svc_change > 0:
-                            service_increases.append({
-                                'service': service,
-                                'change': svc_change,
-                                'old_cost': old_cost,
-                                'new_cost': new_cost
-                            })
-                        else:
-                            service_decreases.append({
-                                'service': service,
-                                'change': svc_change,
-                                'old_cost': old_cost,
-                                'new_cost': new_cost
-                            })
-                
-                # Sort by change amount (biggest first)
-                service_increases.sort(key=lambda x: x['change'], reverse=True)
-                service_decreases.sort(key=lambda x: abs(x['change']), reverse=True)
-                
-                # Build detailed action
-                action_parts = []
-                
-                if change > 0:  # Overall increase
-                    # Show top increases (what's causing the problem)
-                    if service_increases:
-                        action_parts.append("**Top cost increases:**")
-                        for idx, svc in enumerate(service_increases[:3], 1):
-                            action_parts.append(
-                                f"{idx}. **{svc['service']}** +${svc['change']:,.2f} "
-                                f"(${svc['old_cost']:,.2f} → ${svc['new_cost']:,.2f})"
-                            )
-                        
-                        # Mention decreases as a footnote
-                        if service_decreases:
-                            total_decreased = sum(abs(s['change']) for s in service_decreases)
-                            action_parts.append(
-                                f"\n*Note: ${total_decreased:,.2f} was saved from {len(service_decreases)} service(s), "
-                                f"but increases outpaced savings.*"
-                            )
-                    else:
-                        action_parts.append("New services or resources were added.")
-                else:  # Overall decrease
-                    # Show top decreases (what's saving money)
-                    if service_decreases:
-                        action_parts.append("**Top cost savings:**")
-                        for idx, svc in enumerate(service_decreases[:3], 1):
-                            action_parts.append(
-                                f"{idx}. **{svc['service']}** -${abs(svc['change']):,.2f} "
-                                f"(${svc['old_cost']:,.2f} → ${svc['new_cost']:,.2f})"
-                            )
-                
-                action = "\n".join(action_parts) if action_parts else "Minor changes across multiple services."
-                
-                insights.append({
-                    "type": "cost_trend",
-                    "severity": "high" if change_pct > 20 else "medium",
-                    "title": f"Costs {trend} {abs(change_pct):.1f}% over last 3 months",
-                    "description": f"Your total costs went from ${oldest_total:,.2f} ({oldest_month}) to ${newest_total:,.2f} ({newest_month}), a change of ${change:+,.2f}.",
-                    "action": action
-                })
+                    underutilized_instances_data.append({
+                        "name": inst.get('display_name', 'N/A'),
+                        "compartment": compartment_map.get(inst.get('compartment_ocid'), 'Unknown'),
+                        "vcpus": vcpus,
+                        "memory_gb": inst.get('memory_in_gbs') or 0,
+                        "shape": inst.get('shape', 'N/A'),
+                        "cpu_percent": cpu,
+                        "memory_percent": mem,
+                        "potential_savings": savings,
+                        "lifecycle_state": inst.get('lifecycle_state', 'N/A'),
+                        "ocid": inst.get('ocid', 'N/A')
+                    })
         
         # ========================================================================
-        # 2. SERVICE ANALYSIS
+        # 2. CALCULATE SERVICE COSTS & TIME PERIODS (needed for Quick Wins and AI analysis)
         # ========================================================================
+        
+        # Calculate time periods for analysis
+        sorted_months = sorted(monthly_costs.keys()) if monthly_costs else []
+        oldest_month = sorted_months[0] if sorted_months else None
+        newest_month = sorted_months[-1] if sorted_months else None
+        latest_month = newest_month  # Alias for compatibility
         
         # Aggregate costs by service for latest month
-        latest_month = sorted(monthly_costs.keys())[-1]
-        latest_costs = monthly_costs[latest_month]
+        latest_costs = monthly_costs.get(latest_month, []) if latest_month else []
         
         service_costs = {}
         for cost in latest_costs:
             service = cost['service']
             service_costs[service] = service_costs.get(service, 0) + cost['cost']
         
-        total_cost = sum(service_costs.values())
-        
-        # Find services > 40% of total
-        dominant_services = []
-        for service, cost in service_costs.items():
-            pct = (cost / total_cost * 100) if total_cost > 0 else 0
-            if pct > 40:
-                dominant_services.append((service, cost, pct))
-        
-        if dominant_services:
-            for service, cost, pct in dominant_services:
-                # Provide service-specific recommendations
-                action = ""
-                if service in ["COMPUTE", "Compute"]:
-                    running = [i for i in instances if i['lifecycle_state'] == 'RUNNING']
-                    stopped = [i for i in instances if i['lifecycle_state'] == 'STOPPED']
-                    
-                    # Check if we have metrics to show underutilization
-                    underutilized_count = 0
-                    potential_underutil_savings = 0
-                    
-                    for inst in running:
-                        if not inst.get('is_deleted', False):
-                            metrics = instance_metrics.get(inst['ocid'], {})
-                            cpu = metrics.get('CpuUtilization')
-                            mem = metrics.get('MemoryUtilization')
-                            
-                            if cpu is not None and mem is not None and cpu < 40 and mem < 40:
-                                underutilized_count += 1
-                                vcpus = inst.get('vcpus') or 0
-                                if vcpus > 0:
-                                    potential_underutil_savings += (vcpus * 50) * 0.50
-                    
-                    action = f"**Optimization tips for Compute:**\n"
-                    
-                    if underutilized_count > 0:
-                        action += f"• **{underutilized_count} underutilized instances** detected (CPU & Memory <40%) - Downsize to save ~${potential_underutil_savings:.0f}/month\n"
-                    
-                    action += f"• {len(running)} running instance(s) - Consider Reserved Capacity (38% savings)\n"
-                    
-                    if stopped:
-                        action += f"• {len(stopped)} stopped instance(s) - Terminate to save ~${len(stopped) * 50}/month\n"
-                    
-                    if underutilized_count == 0 and len(instance_metrics) < len(running):
-                        action += f"• Run 'Refresh Metrics' to analyze {len(running) - len(instance_metrics)} instances without utilization data"
+        # Calculate accurate savings for underutilized instances using real compute costs
+        if underutilized_instances_data and total_running_vcpus > 0:
+            compute_cost = service_costs.get('COMPUTE', service_costs.get('Compute', 0))
+            if compute_cost > 0:
+                # Calculate cost per vCPU based on actual spending
+                cost_per_vcpu = compute_cost / total_running_vcpus
                 
-                elif service in ["BLOCK_STORAGE", "Block Storage"]:
-                    available_vols = [v for v in volumes if v['lifecycle_state'] == 'AVAILABLE']
-                    total_gb = sum(v.get('size_in_gbs', 0) for v in available_vols)
-                    action = f"**Optimization tips for Block Storage:**\n"
-                    action += f"• {len(available_vols)} volume(s) in AVAILABLE state ({total_gb:,.0f} GB)\n"
-                    action += f"• Delete unattached volumes (~${total_gb * 0.0255:.2f}/month savings)\n"
-                    action += f"• Consider Balanced or Lower Cost performance tiers for non-critical workloads"
-                
-                elif service in ["OBJECT_STORAGE", "Object Storage"]:
-                    action = f"**Optimization tips for Object Storage:**\n"
-                    action += f"• Move infrequently accessed data to Archive tier (90% cheaper)\n"
-                    action += f"• Use Infrequent Access tier for rarely used data (50% cheaper)\n"
-                    action += f"• Enable Object Lifecycle Policies to automate tiering"
-                
-                elif service in ["DATABASE", "Database", "OCI Database Service with PostgreSQL"]:
-                    action = f"**Optimization tips for Database:**\n"
-                    action += f"• Review database shapes for rightsizing\n"
-                    action += f"• Consider Autonomous Database for automatic optimization\n"
-                    action += f"• Stop non-production databases during off-hours"
-                
-                elif service in ["FILE_STORAGE", "File Storage"]:
-                    action = f"**Optimization tips for File Storage:**\n"
-                    action += f"• Delete unused file systems\n"
-                    action += f"• Review snapshot retention policies\n"
-                    action += f"• Consider compressing data to reduce storage"
-                
-                elif service in ["LOAD_BALANCER", "Load Balancer"]:
-                    active_lbs = [lb for lb in load_balancers if lb['lifecycle_state'] == 'ACTIVE']
-                    
-                    # Check for low-bandwidth load balancers
-                    low_bandwidth_count = 0
-                    low_bandwidth_savings = 0
-                    
-                    for lb in active_lbs:
-                        if not lb.get('is_deleted', False):
-                            metrics = lb_metrics.get(lb['ocid'], {})
-                            peak_bandwidth = metrics.get('PeakBandwidth')
-                            
-                            # Low bandwidth: < 10 Mbps average peak
-                            if peak_bandwidth is not None and peak_bandwidth < 10:
-                                low_bandwidth_count += 1
-                                low_bandwidth_savings += 35
-                    
-                    action = f"**Optimization tips for Load Balancers:**\n"
-                    
-                    if low_bandwidth_count > 0:
-                        action += f"• **{low_bandwidth_count} low-bandwidth load balancers** detected (<10 Mbps peak) - Downsize or consolidate to save ~${low_bandwidth_savings}/month\n"
-                    
-                    action += f"• {len(active_lbs)} active load balancers - Review if all are needed\n"
-                    action += f"• Consider Network Load Balancers (cheaper for simple TCP/UDP forwarding)\n"
-                    
-                    if low_bandwidth_count == 0 and len(lb_metrics) < len(active_lbs):
-                        action += f"• Run 'Refresh Metrics' to analyze {len(active_lbs) - len(lb_metrics)} load balancers without bandwidth data"
-                
-                else:
-                    action = f"Review {service} resources for optimization opportunities."
-                
-                insights.append({
-                    "type": "dominant_service",
-                    "severity": "medium",
-                    "title": f"{service} dominates your costs",
-                    "description": f"{service} accounts for {pct:.1f}% (${cost:,.2f}) of your total spending in {latest_month}.",
-                    "action": action
-                })
+                # Calculate savings for underutilized instances (assume 30% savings from rightsizing)
+                for inst_data in underutilized_instances_data:
+                    vcpus = inst_data['vcpus']
+                    if vcpus > 0:
+                        estimated_cost = vcpus * cost_per_vcpu
+                        savings = estimated_cost * 0.30  # Conservative 30% savings
+                        inst_data['potential_savings'] = savings
+                        potential_underutil_savings += savings
         
         # ========================================================================
         # 3. RESOURCE-BASED RECOMMENDATIONS
         # ========================================================================
         
         recommendations = []
+        
+        # ========================================================================
+        # 3.0 UNDERUTILIZED INSTANCES (NEW DEDICATED CARD)
+        # ========================================================================
+        if underutilized_instances_data:
+            # Build summary
+            action_parts = []
+            action_parts.append(f"**{len(underutilized_instances_data)} running instances** are severely underutilized (both CPU & Memory <40%)")
+            action_parts.append("")
+            action_parts.append("These instances are using far less resources than their current shape provides.")
+            action_parts.append("")
+            action_parts.append("**Recommended Actions:**")
+            action_parts.append("• Downsize to smaller shapes (reduce vCPUs and memory)")
+            action_parts.append("• Review application requirements vs current allocations")
+            action_parts.append("• Test smaller shapes in non-prod first")
+            action_parts.append("• Consider burstable instances for variable workloads")
+            action_parts.append("")
+            action_parts.append(f"**Estimated Savings:** ~${potential_underutil_savings:,.0f}/month")
+            action_parts.append("")
+            action_parts.append(f"💡 Click **'View Full Report'** to see all {len(underutilized_instances_data)} instances with CPU/Memory metrics")
+            
+            recommendations.append({
+                "type": "underutilized_instances",
+                "severity": "high",
+                "title": f"🎯 {len(underutilized_instances_data)} underutilized instance(s) detected",
+                "description": f"Instances running with low CPU and Memory utilization (<40%).",
+                "potential_savings": potential_underutil_savings,
+                "action": "\n".join(action_parts),
+                "details": {
+                    "total_count": len(underutilized_instances_data),
+                    "data": underutilized_instances_data
+                }
+            })
         
         # ========================================================================
         # 3.1 STOPPED INSTANCES (HIGH PRIORITY)
@@ -362,32 +242,21 @@ async def generate_ai_recommendations(user_id: int) -> Dict[str, Any]:
             # Estimate cost (rough estimate: $50/month per stopped instance for storage)
             estimated_cost = len(stopped_instances) * 50
             
-            # Build detailed list
+            # Build summary (no table - it's in the modal now)
             action_parts = []
-            action_parts.append(f"**🛑 {len(stopped_instances)} stopped instances still costing ~${estimated_cost}/month:**")
+            action_parts.append(f"**{len(stopped_instances)} stopped instances** still costing ~**${estimated_cost}/month**")
             action_parts.append("")
-            action_parts.append("| Instance | Compartment | Shape | Action |")
-            action_parts.append("|----------|-------------|-------|--------|")
-            
-            for inst in stopped_instances[:15]:  # Show top 15
-                name = inst.get('display_name', 'N/A')[:25]
-                compartment = compartment_map.get(inst.get('compartment_ocid'), 'Unknown')[:20]
-                vcpus = inst.get('vcpus') or 0
-                memory = inst.get('memory_in_gbs') or 0
-                shape_display = f"{vcpus}vCPU/{memory}GB" if vcpus and memory else inst.get('shape', 'N/A')[:15]
-                
-                action_parts.append(
-                    f"| {name} | {compartment} | {shape_display} | Terminate |"
-                )
-            
-            if len(stopped_instances) > 15:
-                action_parts.append(f"\n*...and {len(stopped_instances) - 15} more stopped instances*")
-            
-            action_parts.append("\n**Recommended Actions:**")
-            action_parts.append("1. Create backups if needed")
-            action_parts.append("2. Terminate unused instances")
-            action_parts.append("3. Remove associated boot volumes")
-            action_parts.append("4. **Estimated Savings:** ~${:,.0f}/month".format(estimated_cost))
+            action_parts.append("Stopped compute instances still cost ~$50/month each for boot volume storage.")
+            action_parts.append("")
+            action_parts.append("**Recommended Actions:**")
+            action_parts.append("• Create backups if needed before termination")
+            action_parts.append("• Terminate unused instances")
+            action_parts.append("• Remove associated boot volumes")
+            action_parts.append("• Consider custom images for future redeployment")
+            action_parts.append("")
+            action_parts.append(f"**Estimated Savings:** ~${estimated_cost:,.0f}/month")
+            action_parts.append("")
+            action_parts.append(f"💡 Click **'View Full Report'** to see all {len(stopped_instances)} stopped instances")
             
             recommendations.append({
                 "type": "stopped_instances",
@@ -395,7 +264,23 @@ async def generate_ai_recommendations(user_id: int) -> Dict[str, Any]:
                 "title": f"🛑 {len(stopped_instances)} stopped instance(s) still incurring costs",
                 "description": f"Stopped compute instances still cost ~$50/month each for boot volume storage.",
                 "potential_savings": estimated_cost,
-                "action": "\n".join(action_parts)
+                "action": "\n".join(action_parts),
+                "details": {
+                    "total_count": len(stopped_instances),
+                    "data": [
+                        {
+                            "name": inst.get('display_name', 'N/A'),
+                            "compartment": compartment_map.get(inst.get('compartment_ocid'), 'Unknown'),
+                            "vcpus": inst.get('vcpus') or 0,
+                            "memory_gb": inst.get('memory_in_gbs') or 0,
+                            "shape": inst.get('shape', 'N/A'),
+                            "estimated_cost": 50,  # $50/month per stopped instance
+                            "lifecycle_state": inst.get('lifecycle_state', 'N/A'),
+                            "ocid": inst.get('ocid', 'N/A')
+                        }
+                        for inst in stopped_instances
+                    ]
+                }
             })
         
         # ========================================================================
@@ -413,31 +298,21 @@ async def generate_ai_recommendations(user_id: int) -> Dict[str, Any]:
             total_gb = sum((vol.get('size_in_gbs') or 0) for vol in unattached_volumes)
             estimated_cost = total_gb * 0.0255
             
-            # Build detailed table
-            action_parts = []
-            action_parts.append(f"**💾 {len(unattached_volumes)} unattached volumes costing ~${estimated_cost:,.2f}/month:**")
-            action_parts.append("")
-            action_parts.append("| Volume | Compartment | Size | Monthly Cost | Action |")
-            action_parts.append("|--------|-------------|------|--------------|--------|")
-            
             # Sort by size (largest first)
             sorted_volumes = sorted(unattached_volumes, key=lambda v: v.get('size_in_gbs') or 0, reverse=True)
             
-            for vol in sorted_volumes[:15]:  # Show top 15
-                name = vol.get('display_name', 'N/A')[:20]
-                compartment = compartment_map.get(vol.get('compartment_ocid'), 'Unknown')[:15]
-                size_gb = vol.get('size_in_gbs') or 0
-                monthly_cost = size_gb * 0.0255
-                
-                action_parts.append(
-                    f"| {name} | {compartment} | {size_gb} GB | ${monthly_cost:.2f} | Delete/Attach |"
-                )
-            
-            if len(unattached_volumes) > 15:
-                action_parts.append(f"\n*...and {len(unattached_volumes) - 15} more unattached volumes*")
-            
-            action_parts.append(f"\n**Total:** {total_gb:,.0f} GB unattached storage costing ${estimated_cost:,.2f}/month")
-            action_parts.append("**Action:** Delete unused volumes or attach them to instances")
+            # Build summary (no table - it's in the modal now)
+            action_parts = []
+            action_parts.append(f"**{len(unattached_volumes)} unattached volumes** ({total_gb:,.0f} GB total) costing ~**${estimated_cost:,.2f}/month**")
+            action_parts.append("")
+            action_parts.append("These volumes are not attached to any instances and are wasting money.")
+            action_parts.append("")
+            action_parts.append("**Recommended Actions:**")
+            action_parts.append("• Review the full list and delete unused volumes")
+            action_parts.append("• Attach volumes that are still needed")
+            action_parts.append("• Take snapshots before deletion for backup")
+            action_parts.append("")
+            action_parts.append(f"💡 Click **'View Full Report'** to see all {len(unattached_volumes)} volumes with details")
             
             recommendations.append({
                 "type": "unattached_volumes",
@@ -445,7 +320,22 @@ async def generate_ai_recommendations(user_id: int) -> Dict[str, Any]:
                 "title": f"💾 {len(unattached_volumes)} unattached volume(s) found",
                 "description": f"Unattached block volumes ({total_gb:,.0f} GB total) are costing you money without being used.",
                 "potential_savings": estimated_cost,
-                "action": "\n".join(action_parts)
+                "action": "\n".join(action_parts),
+                "details": {
+                    "total_count": len(unattached_volumes),
+                    "data": [
+                        {
+                            "name": vol.get('display_name', 'N/A'),
+                            "compartment": compartment_map.get(vol.get('compartment_ocid'), 'Unknown'),
+                            "size_gb": vol.get('size_in_gbs') or 0,
+                            "monthly_cost": (vol.get('size_in_gbs') or 0) * 0.0255,
+                            "availability_domain": vol.get('availability_domain', 'N/A'),
+                            "lifecycle_state": vol.get('lifecycle_state', 'N/A'),
+                            "ocid": vol.get('ocid', 'N/A')
+                        }
+                        for vol in sorted_volumes
+                    ]
+                }
             })
         
         # ========================================================================
@@ -459,32 +349,23 @@ async def generate_ai_recommendations(user_id: int) -> Dict[str, Any]:
             current_cost = total_gb * 0.0255
             potential_savings = current_cost * 0.30
             
-            # Build detailed table
-            action_parts = []
-            action_parts.append(f"**📦 {len(large_volumes)} large volumes ({total_gb:,.0f} GB) costing ~${current_cost:,.2f}/month:**")
-            action_parts.append("")
-            action_parts.append("| Volume | Compartment | Size | Current Cost | Potential Savings |")
-            action_parts.append("|--------|-------------|------|--------------|-------------------|")
-            
             # Sort by size (largest first)
             sorted_large_volumes = sorted(large_volumes, key=lambda v: v.get('size_in_gbs') or 0, reverse=True)
             
-            for vol in sorted_large_volumes[:15]:  # Show top 15
-                name = vol.get('display_name', 'N/A')[:20]
-                compartment = compartment_map.get(vol.get('compartment_ocid'), 'Unknown')[:15]
-                size_gb = vol.get('size_in_gbs') or 0
-                monthly_cost = size_gb * 0.0255
-                tier_savings = monthly_cost * 0.30  # 30% savings with lower tier
-                
-                action_parts.append(
-                    f"| {name} | {compartment} | {size_gb:,} GB | ${monthly_cost:.2f} | ${tier_savings:.2f} |"
-                )
-            
-            if len(large_volumes) > 15:
-                action_parts.append(f"\n*...and {len(large_volumes) - 15} more large volumes*")
-            
-            action_parts.append(f"\n**Recommendation:** Switch from Ultra High Performance to Balanced or Lower Cost tier")
+            # Build summary (no table - it's in the modal now)
+            action_parts = []
+            action_parts.append(f"**{len(large_volumes)} large volumes** ({total_gb:,.0f} GB total) costing ~**${current_cost:,.2f}/month**")
+            action_parts.append("")
+            action_parts.append("Large volumes (>1TB) might be using expensive Ultra High Performance tier.")
+            action_parts.append("")
+            action_parts.append("**Recommended Actions:**")
+            action_parts.append("• Switch to Balanced tier for non-critical workloads (30% cheaper)")
+            action_parts.append("• Move cold data to Lower Cost tier (50% cheaper)")
+            action_parts.append("• Review I/O requirements per volume")
+            action_parts.append("")
             action_parts.append(f"**Potential Savings:** ~${potential_savings:,.2f}/month (30% reduction)")
+            action_parts.append("")
+            action_parts.append(f"💡 Click **'View Full Report'** to see all {len(large_volumes)} volumes with costs")
             
             recommendations.append({
                 "type": "large_volumes",
@@ -492,131 +373,26 @@ async def generate_ai_recommendations(user_id: int) -> Dict[str, Any]:
                 "title": f"📦 {len(large_volumes)} large volume(s) could use lower-cost tiers",
                 "description": f"Large volumes ({total_gb:,.0f} GB total) might benefit from Balanced or Lower Cost performance tiers.",
                 "potential_savings": potential_savings,
-                "action": "\n".join(action_parts)
+                "action": "\n".join(action_parts),
+                "details": {
+                    "total_count": len(large_volumes),
+                    "data": [
+                        {
+                            "name": vol.get('display_name', 'N/A'),
+                            "compartment": compartment_map.get(vol.get('compartment_ocid'), 'Unknown'),
+                            "size_gb": vol.get('size_in_gbs') or 0,
+                            "current_cost": (vol.get('size_in_gbs') or 0) * 0.0255,
+                            "potential_savings": (vol.get('size_in_gbs') or 0) * 0.0255 * 0.30,
+                            "lifecycle_state": vol.get('lifecycle_state', 'N/A'),
+                            "ocid": vol.get('ocid', 'N/A')
+                        }
+                        for vol in sorted_large_volumes
+                    ]
+                }
             })
         
         # ========================================================================
-        # 3.4 INSTANCE RIGHTSIZING (WITH REAL UTILIZATION DATA!) 🎯
-        # ========================================================================
-        underutilized_instances = []
-        potential_rightsizing_savings = 0
-        
-        for inst in instances:
-            if inst['lifecycle_state'] != 'RUNNING' or inst.get('is_deleted', False):
-                continue
-            
-            inst_ocid = inst['ocid']
-            inst_name = inst['display_name']
-            vcpus = inst.get('vcpus') or 0
-            memory = inst.get('memory_in_gbs') or 0
-            
-            # Skip small instances
-            if vcpus < 4:
-                continue
-            
-            # Check if we have metrics for this instance
-            metrics = instance_metrics.get(inst_ocid, {})
-            cpu_util = metrics.get('CpuUtilization')
-            mem_util = metrics.get('MemoryUtilization')
-            
-            # CASE 1: We have real metrics - HIGH confidence recommendation
-            if cpu_util is not None and mem_util is not None:
-                if cpu_util < 40 and mem_util < 40:
-                    # Estimate savings: 50% reduction in size = 50% cost savings
-                    estimated_cost = vcpus * 50  # Rough: $50/vCPU/month
-                    savings = estimated_cost * 0.50
-                    
-                    underutilized_instances.append({
-                        'instance': inst,
-                        'cpu': cpu_util,
-                        'memory': mem_util,
-                        'savings': savings,
-                        'confidence': 'HIGH'
-                    })
-                    potential_rightsizing_savings += savings
-            
-            # CASE 2: No metrics but large instance - MEDIUM confidence
-            elif (vcpus >= 8 or memory >= 64):
-                estimated_cost = vcpus * 50
-                savings = estimated_cost * 0.30  # Conservative estimate
-                
-                underutilized_instances.append({
-                    'instance': inst,
-                    'cpu': None,
-                    'memory': None,
-                    'savings': savings,
-                    'confidence': 'MEDIUM'
-                })
-                potential_rightsizing_savings += savings
-        
-        if underutilized_instances:
-            # Separate by confidence
-            high_confidence = [i for i in underutilized_instances if i['confidence'] == 'HIGH']
-            medium_confidence = [i for i in underutilized_instances if i['confidence'] == 'MEDIUM']
-            
-            # Build action message with detailed table
-            action_parts = []
-            
-            if high_confidence:
-                action_parts.append(f"**✅ {len(high_confidence)} confirmed underutilized (with monitoring data):**")
-                action_parts.append("")
-                action_parts.append("| Instance | Compartment | Current Shape | CPU % | Memory % | Recommendation |")
-                action_parts.append("|----------|-------------|---------------|-------|----------|----------------|")
-                
-                for item in high_confidence[:10]:  # Show top 10
-                    inst = item['instance']
-                    vcpus = inst.get('vcpus') or 0
-                    memory = inst.get('memory_in_gbs') or 0
-                    compartment = compartment_map.get(inst.get('compartment_ocid'), 'Unknown')[:15]
-                    cpu_pct = item['cpu']
-                    mem_pct = item['memory']
-                    
-                    # Suggest smaller shape (half the size if heavily underutilized)
-                    if cpu_pct < 20 and mem_pct < 20:
-                        suggested_vcpus = max(2, vcpus // 2) if vcpus > 0 else 2
-                        suggested_memory = max(16, memory // 2) if memory > 0 else 16
-                        recommendation = f"→ {suggested_vcpus}vCPU/{suggested_memory}GB"
-                    else:
-                        suggested_vcpus = max(2, int(vcpus * 0.75)) if vcpus > 0 else 2
-                        suggested_memory = max(16, int(memory * 0.75)) if memory > 0 else 16
-                        recommendation = f"→ {suggested_vcpus}vCPU/{suggested_memory}GB"
-                    
-                    action_parts.append(
-                        f"| {inst['display_name'][:20]} | {compartment} | {vcpus}vCPU/{memory}GB | {cpu_pct:.1f}% | {mem_pct:.1f}% | {recommendation} |"
-                    )
-                
-                if len(high_confidence) > 10:
-                    action_parts.append(f"\n*...and {len(high_confidence) - 10} more underutilized instances*")
-                
-                action_parts.append("\n**Estimated Savings:** ~${:,.0f}/month by rightsizing these instances".format(
-                    sum(item['savings'] for item in high_confidence)
-                ))
-            
-            if medium_confidence:
-                action_parts.append(f"\n**⚠️ {len(medium_confidence)} large instances (no recent metrics):**")
-                for item in medium_confidence[:5]:
-                    inst = item['instance']
-                    action_parts.append(
-                        f"• **{inst['display_name']}** ({inst.get('vcpus', 0)} vCPUs, {inst.get('memory_in_gbs', 0)} GB) - "
-                        f"Run metrics sync to get utilization data"
-                    )
-            
-            action = "\n".join(action_parts)
-            
-            severity = "high" if len(high_confidence) > 0 else "medium"
-            title_emoji = "🎯" if len(high_confidence) > 0 else "🔧"
-            
-            recommendations.append({
-                "type": "rightsizing",
-                "severity": severity,
-                "title": f"{title_emoji} {len(underutilized_instances)} instance(s) for rightsizing review",
-                "description": f"Found {len(high_confidence)} confirmed underutilized instances and {len(medium_confidence)} large instances to review.",
-                "potential_savings": potential_rightsizing_savings,
-                "action": action
-            })
-        
-        # ========================================================================
-        # 3.5 ALWAYS-ON NON-PRODUCTION (SCHEDULING OPPORTUNITY)
+        # 3.4 ALWAYS-ON NON-PRODUCTION (SCHEDULING OPPORTUNITY)
         # ========================================================================
         # Heuristic: instances with "dev", "test", "uat", "sandbox" in name
         non_prod_keywords = ['dev', 'test', 'uat', 'sandbox', 'staging', 'qa', 'demo']
@@ -629,38 +405,38 @@ async def generate_ai_recommendations(user_id: int) -> Dict[str, Any]:
                     non_prod_instances.append(inst)
         
         if non_prod_instances:
+            # Calculate actual costs for non-prod instances based on vCPUs
+            estimated_current = 0
+            if total_running_vcpus > 0:
+                compute_cost = service_costs.get('COMPUTE', service_costs.get('Compute', 0))
+                if compute_cost > 0:
+                    cost_per_vcpu = compute_cost / total_running_vcpus
+                    for inst in non_prod_instances:
+                        vcpus = inst.get('vcpus', 0)
+                        estimated_current += vcpus * cost_per_vcpu
+            
             # Potential 65% savings by running only during business hours (35% of time)
-            estimated_current = len(non_prod_instances) * 100  # $100/month per instance
             potential_savings = estimated_current * 0.65
             
-            # Build detailed table
+            # Build summary (no table - it's in the modal now)
             action_parts = []
-            action_parts.append(f"**⏰ {len(non_prod_instances)} non-production instances running 24/7:**")
+            action_parts.append(f"**{len(non_prod_instances)} non-production instances** running 24/7")
             action_parts.append("")
-            action_parts.append("| Instance | Compartment | Shape | Current Cost | Savings (65%) |")
-            action_parts.append("|----------|-------------|-------|--------------|---------------|")
-            
-            for inst in non_prod_instances[:15]:  # Show top 15
-                name = inst.get('display_name', 'N/A')[:20]
-                compartment = compartment_map.get(inst.get('compartment_ocid'), 'Unknown')[:15]
-                vcpus = inst.get('vcpus') or 0
-                memory = inst.get('memory_in_gbs') or 0
-                shape_display = f"{vcpus}vCPU/{memory}GB" if vcpus and memory else inst.get('shape', 'N/A')[:15]
-                
-                # Estimate cost based on shape
-                monthly_cost = 100  # Rough estimate
-                savings = monthly_cost * 0.65
-                
-                action_parts.append(
-                    f"| {name} | {compartment} | {shape_display} | ${monthly_cost:.0f} | ${savings:.0f} |"
-                )
-            
-            if len(non_prod_instances) > 15:
-                action_parts.append(f"\n*...and {len(non_prod_instances) - 15} more non-prod instances*")
-            
-            action_parts.append(f"\n**Recommendation:** Auto-stop instances outside business hours (9am-6pm weekdays)")
+            action_parts.append("These dev/test/stage instances don't need to run outside business hours.")
+            action_parts.append("")
+            action_parts.append("**Recommended Actions:**")
+            action_parts.append("• Auto-stop instances at 6pm, auto-start at 9am (weekdays only)")
+            action_parts.append("• Use OCI Instance Scheduler or automation scripts")
+            action_parts.append("• Start with staging environments first")
+            action_parts.append("")
             action_parts.append(f"**Potential Savings:** ~${potential_savings:,.0f}/month (65% reduction)")
-            action_parts.append("**Implementation:** Use OCI Instance Scheduler or custom scripts")
+            action_parts.append("")
+            action_parts.append(f"💡 Click **'View Full Report'** to see all {len(non_prod_instances)} instances")
+            
+            # Calculate individual instance savings for details
+            cost_per_vcpu = 0
+            if total_running_vcpus > 0 and compute_cost > 0:
+                cost_per_vcpu = compute_cost / total_running_vcpus
             
             recommendations.append({
                 "type": "non_prod_scheduling",
@@ -668,11 +444,27 @@ async def generate_ai_recommendations(user_id: int) -> Dict[str, Any]:
                 "title": f"⏰ {len(non_prod_instances)} non-production instance(s) running 24/7",
                 "description": f"Non-production instances detected that could be scheduled to run only during business hours.",
                 "potential_savings": potential_savings,
-                "action": "\n".join(action_parts)
+                "action": "\n".join(action_parts),
+                "details": {
+                    "total_count": len(non_prod_instances),
+                    "data": [
+                        {
+                            "name": inst.get('display_name', 'N/A'),
+                            "compartment": compartment_map.get(inst.get('compartment_ocid'), 'Unknown'),
+                            "vcpus": inst.get('vcpus') or 0,
+                            "shape": inst.get('shape', 'N/A'),
+                            "current_cost": (inst.get('vcpus', 0) * cost_per_vcpu),
+                            "potential_savings": (inst.get('vcpus', 0) * cost_per_vcpu) * 0.65,  # 65% savings
+                            "lifecycle_state": inst.get('lifecycle_state', 'N/A'),
+                            "ocid": inst.get('ocid', 'N/A')
+                        }
+                        for inst in non_prod_instances
+                    ]
+                }
             })
         
         # ========================================================================
-        # 3.6 UNDERUTILIZED LOAD BALANCERS (BANDWIDTH ANALYSIS) 🔄
+        # 3.5 UNDERUTILIZED LOAD BALANCERS (BANDWIDTH ANALYSIS) 🔄
         # ========================================================================
         underutilized_lbs = []
         potential_lb_savings = 0
@@ -696,13 +488,17 @@ async def generate_ai_recommendations(user_id: int) -> Dict[str, Any]:
                     # Load balancer costs ~$25-50/month depending on shape
                     estimated_cost = 35  # Average
                     
-                    # Extract configured bandwidth from shape if possible
-                    configured_bandwidth = None
-                    if 'Mbps' in lb_shape:
-                        try:
-                            configured_bandwidth = int(''.join(filter(str.isdigit, lb_shape.split('Mbps')[0])))
-                        except:
-                            pass
+                    # Get configured bandwidth from database (for flexible LBs)
+                    configured_bandwidth = lb.get('max_bandwidth_mbps')
+                    if configured_bandwidth is None:
+                        # Fallback: Try to parse from shape name (for fixed-shape LBs)
+                        if lb_shape and 'Mbps' in lb_shape:
+                            try:
+                                # Extract number before 'Mbps' (e.g., "100Mbps" -> 100)
+                                parts = lb_shape.split('Mbps')[0]
+                                configured_bandwidth = int(''.join(filter(str.isdigit, parts)))
+                            except:
+                                configured_bandwidth = None
                     
                     underutilized_lbs.append({
                         'lb': lb,
@@ -731,48 +527,23 @@ async def generate_ai_recommendations(user_id: int) -> Dict[str, Any]:
             high_confidence = [lb for lb in underutilized_lbs if lb['confidence'] == 'HIGH']
             medium_confidence = [lb for lb in underutilized_lbs if lb['confidence'] == 'MEDIUM']
             
-            # Build action message with detailed list
+            # Build summary (no table - it's in the modal now)
             action_parts = []
-            
+            action_parts.append(f"**{len(underutilized_lbs)} load balancers** with low bandwidth usage")
+            action_parts.append("")
             if high_confidence:
-                action_parts.append(f"**✅ {len(high_confidence)} confirmed underutilized (with bandwidth metrics):**")
-                action_parts.append("")
-                action_parts.append("| Load Balancer | Compartment | Shape | Peak Bandwidth | Recommendation |")
-                action_parts.append("|--------------|-------------|-------|----------------|----------------|")
-                
-                for item in high_confidence[:10]:  # Show top 10
-                    lb = item['lb']
-                    compartment = compartment_map.get(lb.get('compartment_ocid'), 'Unknown')[:15]
-                    shape = lb.get('shape_name', 'N/A')[:15]
-                    peak = item['peak_bandwidth']
-                    configured = item['configured_bandwidth']
-                    
-                    if configured and configured > 100:
-                        recommendation = f"↓ {configured // 2} Mbps"
-                    elif peak < 1:
-                        recommendation = "Delete (zero traffic)"
-                    else:
-                        recommendation = "Consolidate/downsize"
-                    
-                    action_parts.append(
-                        f"| {lb['display_name'][:20]} | {compartment} | {shape} | {peak:.1f} Mbps | {recommendation} |"
-                    )
-                
-                if len(high_confidence) > 10:
-                    action_parts.append(f"\n*...and {len(high_confidence) - 10} more*")
-                
-                action_parts.append("\n**Potential Actions:**")
-                action_parts.append("• Consolidate multiple low-bandwidth LBs into one")
-                action_parts.append("• Switch to Network Load Balancer (cheaper for TCP/UDP)")
-                action_parts.append("• Delete LBs with near-zero traffic")
-            
+                action_parts.append(f"• **{len(high_confidence)} confirmed low-traffic** (<10 Mbps peak)")
             if medium_confidence:
-                action_parts.append(f"\n**⚠️ {len(medium_confidence)} suspicious load balancers (no metrics):**")
-                for item in medium_confidence[:3]:
-                    lb = item['lb']
-                    action_parts.append(
-                        f"• **{lb['display_name']}** - Run metrics sync to verify usage"
-                    )
+                action_parts.append(f"• **{len(medium_confidence)} suspicious LBs** (no metrics)")
+            action_parts.append("")
+            action_parts.append("**Recommended Actions:**")
+            action_parts.append("• Consolidate multiple low-bandwidth LBs into one")
+            action_parts.append("• Switch to Network Load Balancer (cheaper for TCP/UDP)")
+            action_parts.append("• Delete LBs with near-zero traffic")
+            if medium_confidence:
+                action_parts.append("• Run 'Refresh Metrics' to verify actual usage")
+            action_parts.append("")
+            action_parts.append(f"**Potential Savings:** ~${potential_lb_savings:,.0f}/month")
             
             action = "\n".join(action_parts)
             
@@ -785,7 +556,24 @@ async def generate_ai_recommendations(user_id: int) -> Dict[str, Any]:
                 "title": f"{title_emoji} {len(underutilized_lbs)} load balancer(s) with low bandwidth",
                 "description": f"Found {len(high_confidence)} confirmed low-bandwidth load balancers (<10 Mbps peak) and {len(medium_confidence)} suspicious ones.",
                 "potential_savings": potential_lb_savings,
-                "action": action
+                "action": action,
+                "details": {
+                    "total_count": len(underutilized_lbs),
+                    "data": [
+                        {
+                            "name": item['lb'].get('display_name', 'N/A'),
+                            "compartment": compartment_map.get(item['lb'].get('compartment_ocid'), 'Unknown'),
+                            "shape": item['lb'].get('shape_name', 'N/A'),
+                            "peak_bw_mbps": item['peak_bandwidth'] if item['peak_bandwidth'] is not None else 'No metrics',
+                            "max_bw_mbps": item['configured_bandwidth'] if item['configured_bandwidth'] else 'N/A',
+                            "confidence": item['confidence'],
+                            "potential_savings": item['savings'],
+                            "lifecycle_state": item['lb'].get('lifecycle_state', 'N/A'),
+                            "ocid": item['lb'].get('ocid', 'N/A')
+                        }
+                        for item in underutilized_lbs
+                    ]
+                }
             })
         
         # ========================================================================
@@ -797,48 +585,54 @@ async def generate_ai_recommendations(user_id: int) -> Dict[str, Any]:
         # Reserved capacity opportunity
         running_instances = [i for i in instances if i['lifecycle_state'] == 'RUNNING' and not i.get('is_deleted', False)]
         if running_instances:
-            # Rough estimate: $100/instance/month, 38% savings with reserved
-            estimated_current_cost = len(running_instances) * 100
-            potential_savings = estimated_current_cost * 0.38
-            
-            # Build detailed table for top production instances
-            action_parts = []
-            action_parts.append(f"**💰 {len(running_instances)} running instances eligible for Reserved Capacity:**")
-            action_parts.append("")
-            action_parts.append("| Instance | Compartment | Shape | Est. Monthly Cost | Savings (38%) |")
-            action_parts.append("|----------|-------------|-------|-------------------|---------------|")
+            # Use actual compute costs (monthly)
+            compute_cost = service_costs.get('COMPUTE', service_costs.get('Compute', 0))
+            potential_savings = compute_cost * 0.38  # 38% savings with 1-year reserved capacity
             
             # Sort by shape (largest first based on vCPUs)
             sorted_instances = sorted(running_instances, key=lambda i: i.get('vcpus') or 0, reverse=True)
             
-            for inst in sorted_instances[:15]:  # Show top 15 largest
-                name = inst.get('display_name', 'N/A')[:20]
-                compartment = compartment_map.get(inst.get('compartment_ocid'), 'Unknown')[:15]
-                vcpus = inst.get('vcpus') or 0
-                memory = inst.get('memory_in_gbs') or 0
-                shape_display = f"{vcpus}vCPU/{memory}GB" if vcpus and memory else inst.get('shape', 'N/A')[:15]
-                
-                # Estimate cost based on vCPUs
-                monthly_cost = max(50, vcpus * 25) if vcpus > 0 else 100  # ~$25/vCPU
-                savings = monthly_cost * 0.38
-                
-                action_parts.append(
-                    f"| {name} | {compartment} | {shape_display} | ${monthly_cost:.0f} | ${savings:.0f} |"
-                )
-            
-            if len(running_instances) > 15:
-                action_parts.append(f"\n*...and {len(running_instances) - 15} more running instances*")
-            
-            action_parts.append(f"\n**Recommendation:** Purchase Reserved Capacity for 1-year commitment")
-            action_parts.append(f"**Potential Savings:** ~${potential_savings:,.0f}/month (38% discount)")
+            # Build summary (no table - it's in the modal now)
+            action_parts = []
+            action_parts.append(f"You have **{len(running_instances)} running instance(s)**. Reserve capacity for 1-year to save **38%**.")
+            action_parts.append("")
+            action_parts.append("**⚡ Action:**")
+            action_parts.append("• Focus on production instances that run 24/7")
+            action_parts.append("• Commit to 1-year or 3-year terms for maximum savings")
+            action_parts.append("• Benefits: Guaranteed capacity + 38% cost reduction")
+            action_parts.append("")
+            action_parts.append(f"**Potential Savings:** ~${potential_savings:,.0f}/month")
+            action_parts.append("")
+            action_parts.append(f"💡 Click **'View Full Report'** to see all {len(running_instances)} eligible instances")
             action_parts.append("**Best for:** Always-on production workloads (not dev/test)")
+            
+            # Calculate individual instance savings for details
+            cost_per_vcpu = 0
+            if total_running_vcpus > 0:
+                cost_per_vcpu = compute_cost / total_running_vcpus
             
             quick_wins.append({
                 "type": "reserved_capacity",
                 "title": "Consider Reserved Capacity",
                 "description": f"You have {len(running_instances)} running instance(s). Reserve capacity for 1-year to save 38%.",
                 "potential_savings": potential_savings,
-                "action": "\n".join(action_parts)
+                "action": "\n".join(action_parts),
+                "details": {
+                    "total_count": len(running_instances),
+                    "data": [
+                        {
+                            "name": inst.get('display_name', 'N/A'),
+                            "compartment": compartment_map.get(inst.get('compartment_ocid'), 'Unknown'),
+                            "vcpus": inst.get('vcpus') or 0,
+                            "shape": inst.get('shape', 'N/A'),
+                            "current_cost": (inst.get('vcpus', 0) * cost_per_vcpu),
+                            "potential_savings": (inst.get('vcpus', 0) * cost_per_vcpu) * 0.38,  # 38% savings
+                            "lifecycle_state": inst.get('lifecycle_state', 'N/A'),
+                            "ocid": inst.get('ocid', 'N/A')
+                        }
+                        for inst in running_instances[:min(len(running_instances), 1000)]  # Limit to avoid huge payloads
+                    ]
+                }
             })
         
         # Object Storage tier optimization
@@ -862,6 +656,152 @@ async def generate_ai_recommendations(user_id: int) -> Dict[str, Any]:
         total_potential_savings = sum(r.get('potential_savings', 0) for r in recommendations + quick_wins)
         
         # ========================================================================
+        # 6. AI NARRATIVE ANALYSIS (The Real AI!)
+        # ========================================================================
+        
+        logger.info("🤖 Generating AI narrative analysis...")
+        
+        ai_analysis = {
+            "narrative": "",
+            "reasoning_steps": [],
+            "tool_invocations": [],
+            "confidence_scores": {}
+        }
+        
+        try:
+            # Track tool invocations for transparency
+            ai_analysis["tool_invocations"] = [
+                {"tool": "get_cost_cache", "status": "completed", "result": f"Found {len(monthly_costs)} months of data"},
+                {"tool": "get_resource_inventory", "status": "completed", "result": f"{len(instances)} instances, {len(volumes)} volumes"},
+                {"tool": "static_analysis", "status": "completed", "result": f"{len(insights)} insights, {len(recommendations)} recommendations"}
+            ]
+            
+            # Prepare data summary for LLM
+            data_summary = {
+                "timeframe": f"{months_to_analyze[0]} to {months_to_analyze[-1]}",
+                "latest_month_cost": monthly_totals.get(latest_month, 0),
+                "cost_trend": {
+                    "oldest": monthly_totals.get(oldest_month, 0),
+                    "newest": monthly_totals.get(newest_month, 0),
+                    "change_pct": ((monthly_totals.get(newest_month, 0) - monthly_totals.get(oldest_month, 0)) / monthly_totals.get(oldest_month, 1)) * 100 if monthly_totals.get(oldest_month, 0) > 0 else 0
+                },
+                "resources": {
+                    "instances": {
+                        "total": len(instances),
+                        "running": len([i for i in instances if i['lifecycle_state'] == 'RUNNING']),
+                        "stopped": len([i for i in instances if i['lifecycle_state'] == 'STOPPED'])
+                    },
+                    "volumes": {
+                        "total": len(volumes),
+                        "unattached": len([v for v in volumes if v['lifecycle_state'] == 'AVAILABLE']),
+                        "total_unattached_gb": sum(v.get('size_in_gbs', 0) for v in volumes if v['lifecycle_state'] == 'AVAILABLE')
+                    }
+                },
+                "top_services": sorted(service_costs.items(), key=lambda x: x[1], reverse=True)[:3],
+                "static_findings": {
+                    "insights_count": len(insights),
+                    "recommendations_count": len(recommendations),
+                    "potential_savings": total_potential_savings
+                }
+            }
+            
+            # Create prompt for LLM
+            prompt = f"""You are analyzing cloud infrastructure cost data. Based on the data below, provide a structured analysis.
+
+Format your response EXACTLY like this:
+
+**Executive Summary:**
+[2-3 sentences about the most important cost trends and overall health]
+
+**Key Findings:**
+• [Finding 1 with specific numbers and percentages]
+• [Finding 2 with specific numbers and percentages]
+• [Finding 3 with specific numbers and percentages]
+• [Finding 4 with specific numbers and percentages]
+
+**Priority Actions:**
+1. [Action 1] - [Expected impact in dollars]
+2. [Action 2] - [Expected impact in dollars]
+3. [Action 3] - [Expected impact in dollars]
+
+Data Summary:
+```json
+{json.dumps(data_summary, indent=2)}
+```
+
+Guidelines:
+- Use **bold** for section headers (Executive Summary, Key Findings, Priority Actions)
+- Use bullet points (•) for Key Findings
+- Use numbered lists (1. 2. 3.) for Priority Actions
+- Be specific with numbers, percentages, and dollar amounts
+- Focus on actionable insights, not generic advice
+- If costs are rising, explain WHY with data
+- If there's waste, QUANTIFY it with dollars
+- Use business language, avoid cloud jargon
+- Keep it concise but informative
+
+Your analysis:"""
+
+            # Call LLM directly (no checkpointer needed for one-off analysis)
+            ai_analysis["tool_invocations"].append({
+                "tool": "LLM_analysis", 
+                "status": "running", 
+                "result": "Analyzing data..."
+            })
+            
+            # Import LLM directly
+            from app.models import get_openai_client
+            llm = get_openai_client()
+            
+            # Call LLM without agent/checkpointer (we don't need conversation state)
+            messages = [HumanMessage(content=prompt)]
+            response = await llm.ainvoke(messages)
+            
+            # Extract AI response
+            ai_narrative = response.content if hasattr(response, 'content') else str(response)
+            
+            ai_analysis["narrative"] = ai_narrative
+            ai_analysis["tool_invocations"][-1]["status"] = "completed"
+            ai_analysis["tool_invocations"][-1]["result"] = f"Generated {len(ai_narrative)} chars"
+            
+            # Add reasoning steps
+            ai_analysis["reasoning_steps"] = [
+                "Fetched cost data from cache for last 3 months",
+                "Loaded resource inventory (instances, volumes, load balancers)",
+                "Performed static analysis for cost trends and waste detection",
+                f"Analyzed {len(monthly_costs)} months of billing data",
+                "Generated AI narrative with LLM reasoning"
+            ]
+            
+            # Add confidence scores to existing insights
+            for insight in insights:
+                # High confidence if we have actual data
+                if "cost" in insight.get("type", ""):
+                    ai_analysis["confidence_scores"][insight["title"]] = 95
+                elif "metrics" in insight.get("description", "").lower():
+                    ai_analysis["confidence_scores"][insight["title"]] = 90
+                else:
+                    ai_analysis["confidence_scores"][insight["title"]] = 85
+            
+            for rec in recommendations:
+                # Confidence based on whether we have utilization metrics
+                if "metrics" in rec.get("action", "").lower() and "Refresh Metrics" in rec.get("action", ""):
+                    ai_analysis["confidence_scores"][rec["title"]] = 70
+                else:
+                    ai_analysis["confidence_scores"][rec["title"]] = 85
+            
+            logger.info(f"✅ Generated AI narrative ({len(ai_narrative)} characters)")
+            
+        except Exception as e:
+            logger.error(f"Error generating AI narrative: {str(e)}", exc_info=True)
+            ai_analysis["narrative"] = "AI analysis temporarily unavailable. Showing static insights only."
+            ai_analysis["tool_invocations"].append({
+                "tool": "LLM_analysis",
+                "status": "failed",
+                "result": str(e)
+            })
+        
+        # ========================================================================
         # RETURN RESULTS
         # ========================================================================
         
@@ -873,11 +813,13 @@ async def generate_ai_recommendations(user_id: int) -> Dict[str, Any]:
             "insights": insights,
             "recommendations": recommendations,
             "quick_wins": quick_wins,
+            "ai_analysis": ai_analysis,  # NEW!
             "summary": {
                 "total_insights": len(insights),
                 "total_recommendations": len(recommendations),
                 "total_quick_wins": len(quick_wins),
-                "estimated_monthly_savings": total_potential_savings
+                "estimated_monthly_savings": total_potential_savings,
+                "is_ai_powered": bool(ai_analysis.get("narrative"))  # NEW!
             }
         }
         

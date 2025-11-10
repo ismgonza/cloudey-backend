@@ -13,7 +13,6 @@ from app.cloud.oci.usage_api_client import UsageApiClient
 from app.cloud.oci.compartment import CompartmentClient
 from app.cloud.oci.compute import ComputeClient
 from app.cloud.oci.block_storage import BlockStorageClient
-from app.cloud.oci.optimization import CostOptimizationAnalyzer
 from app.cache import cached, CacheKeyPrefixes, get_cost_cache
 from app.sysconfig import CacheConfig
 
@@ -287,40 +286,40 @@ async def get_dashboard_data(user_id: int, force_refresh: bool = False) -> Dict:
         stopped_instances = sum(1 for i in all_instances if i.get('lifecycle_state') in ['STOPPED', 'TERMINATED'])
         
         # ============================================================================
-        # 4. OPTIMIZATION SUMMARY
+        # 4. OPTIMIZATION SUMMARY (Using comprehensive recommendations engine)
         # ============================================================================
         logger.debug("Generating optimization summary...")
         
-        optimizer = CostOptimizationAnalyzer(user_id)
+        # Use the same comprehensive recommendations engine as AI Insights for consistency
+        from app.recommendations_engine import generate_ai_recommendations
         
-        # Get recommendations
-        compute_recs = optimizer.analyze_compute_utilization(all_instances, current_costs)
-        storage_recs = optimizer.analyze_storage_optimization(all_volumes, current_costs)
-        reserved_recs = optimizer.calculate_reserved_capacity_savings(all_instances, current_costs)
-        service_recs = optimizer.analyze_service_distribution(service_breakdown)
-        
-        all_recs = compute_recs + storage_recs + reserved_recs + service_recs
-        
-        # Count by severity
-        high_severity = sum(1 for r in all_recs if r['severity'] == 'HIGH')
-        medium_severity = sum(1 for r in all_recs if r['severity'] == 'MEDIUM')
-        low_severity = sum(1 for r in all_recs if r['severity'] == 'LOW')
-        
-        # Calculate potential savings
-        total_potential_savings = 0
-        for rec in reserved_recs:
-            # Extract savings from "Potential Savings" field
-            if 'potential_savings' in rec:
-                savings_str = rec['potential_savings']
-                # Extract the 1-year savings number
-                if '$' in savings_str and '/year' in savings_str:
-                    try:
-                        # Format: "$2,456.78/year (1-year) or $3,367.89/year (3-year)"
-                        parts = savings_str.split('$')[1].split('/')[0]
-                        one_year_savings = float(parts.replace(',', ''))
-                        total_potential_savings += one_year_savings
-                    except:
-                        pass
+        try:
+            recommendations_data = await generate_ai_recommendations(user_id)
+            
+            # Extract data from recommendations
+            all_recs = recommendations_data.get('recommendations', []) + recommendations_data.get('quick_wins', [])
+            total_potential_monthly_savings = recommendations_data.get('total_potential_savings', 0)
+            
+            # Keep as monthly (don't convert to annual)
+            total_potential_savings = total_potential_monthly_savings
+            
+            # Count by severity
+            high_severity = sum(1 for r in all_recs if r.get('severity') == 'high')
+            medium_severity = sum(1 for r in all_recs if r.get('severity') == 'medium')
+            low_severity = sum(1 for r in all_recs if r.get('severity') == 'low')
+            
+            # Get top 3 for display
+            top_3_recs = all_recs[:3] if all_recs else []
+            
+        except Exception as e:
+            logger.error(f"Error generating recommendations: {str(e)}")
+            # Fallback to empty recommendations
+            all_recs = []
+            total_potential_savings = 0
+            high_severity = 0
+            medium_severity = 0
+            low_severity = 0
+            top_3_recs = []
         
         # ============================================================================
         # 5. COST ALERTS - REMOVED (Redundant with optimization recommendations)
@@ -395,14 +394,14 @@ async def get_dashboard_data(user_id: int, force_refresh: bool = False) -> Dict:
                 'high_severity': high_severity,
                 'medium_severity': medium_severity,
                 'low_severity': low_severity,
-                'potential_annual_savings': round(total_potential_savings, 2),
+                'potential_monthly_savings': round(total_potential_savings, 2),  # Monthly savings from all optimizations
                 'top_recommendations': [
                     {
-                        'title': rec['title'],
-                        'severity': rec['severity'].lower(),
-                        'savings': rec.get('potential_savings', 'Variable')
+                        'title': rec.get('title', 'Optimization Available'),
+                        'severity': rec.get('severity', 'medium'),  # Already lowercase from recommendations_engine
+                        'savings': f"${rec.get('potential_savings', 0):,.0f}/month" if isinstance(rec.get('potential_savings'), (int, float)) else str(rec.get('potential_savings', 'Variable'))
                     }
-                    for rec in all_recs[:3]  # Top 3
+                    for rec in top_3_recs
                 ]
             },
             'alerts': alerts[:5],  # Top 5 alerts

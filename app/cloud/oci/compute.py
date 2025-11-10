@@ -54,13 +54,22 @@ class ComputeClient:
             
             instances = []
             for instance in response.data:
+                # Extract vCPUs and memory from shape_config
+                vcpus = None
+                memory_in_gbs = None
+                if hasattr(instance, 'shape_config') and instance.shape_config:
+                    vcpus = instance.shape_config.ocpus if hasattr(instance.shape_config, 'ocpus') else None
+                    memory_in_gbs = instance.shape_config.memory_in_gbs if hasattr(instance.shape_config, 'memory_in_gbs') else None
+                
                 instances.append({
                     "id": instance.id,
                     "display_name": instance.display_name,
                     "shape": instance.shape,
                     "lifecycle_state": instance.lifecycle_state,
                     "availability_domain": instance.availability_domain,
-                    "time_created": str(instance.time_created) if instance.time_created else None
+                    "time_created": str(instance.time_created) if instance.time_created else None,
+                    "vcpus": vcpus,
+                    "memory_in_gbs": memory_in_gbs
                 })
             
             return instances
@@ -81,6 +90,14 @@ class ComputeClient:
             response = self._make_api_call_with_rate_limit(api_call)
             
             instance = response.data
+            
+            # Extract vCPUs and memory from shape_config
+            vcpus = None
+            memory_in_gbs = None
+            if hasattr(instance, 'shape_config') and instance.shape_config:
+                vcpus = instance.shape_config.ocpus if hasattr(instance.shape_config, 'ocpus') else None
+                memory_in_gbs = instance.shape_config.memory_in_gbs if hasattr(instance.shape_config, 'memory_in_gbs') else None
+            
             return {
                 "id": instance.id,
                 "display_name": instance.display_name,
@@ -88,7 +105,9 @@ class ComputeClient:
                 "lifecycle_state": instance.lifecycle_state,
                 "availability_domain": instance.availability_domain,
                 "time_created": str(instance.time_created) if instance.time_created else None,
-                "region": instance.region if hasattr(instance, 'region') else None
+                "region": instance.region if hasattr(instance, 'region') else None,
+                "vcpus": vcpus,
+                "memory_in_gbs": memory_in_gbs
             }
         except Exception as e:
             raise ValueError(f"Error getting instance: {str(e)}")

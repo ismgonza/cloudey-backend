@@ -713,15 +713,17 @@ def upsert_load_balancer(user_id: int, lb_data: Dict[str, Any]) -> bool:
         cursor.execute("""
             INSERT INTO oci_load_balancer (
                 ocid, user_id, compartment_ocid, display_name, shape_name,
-                is_private, ip_addresses, lifecycle_state, region,
-                time_created, last_seen_date, is_deleted
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, FALSE)
+                is_private, ip_addresses, min_bandwidth_mbps, max_bandwidth_mbps,
+                lifecycle_state, region, time_created, last_seen_date, is_deleted
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, FALSE)
             ON CONFLICT(ocid) DO UPDATE SET
                 compartment_ocid = excluded.compartment_ocid,
                 display_name = excluded.display_name,
                 shape_name = excluded.shape_name,
                 is_private = excluded.is_private,
                 ip_addresses = excluded.ip_addresses,
+                min_bandwidth_mbps = excluded.min_bandwidth_mbps,
+                max_bandwidth_mbps = excluded.max_bandwidth_mbps,
                 lifecycle_state = excluded.lifecycle_state,
                 region = excluded.region,
                 last_seen_date = excluded.last_seen_date,
@@ -734,6 +736,8 @@ def upsert_load_balancer(user_id: int, lb_data: Dict[str, Any]) -> bool:
             lb_data.get('shape_name'),
             lb_data.get('is_private'),
             json.dumps(lb_data.get('ip_addresses', [])),
+            lb_data.get('min_bandwidth_mbps'),
+            lb_data.get('max_bandwidth_mbps'),
             lb_data.get('lifecycle_state'),
             lb_data.get('region'),
             lb_data.get('time_created'),
@@ -797,16 +801,16 @@ def get_all_load_balancers_for_user(user_id: int, include_deleted: bool = False)
         if include_deleted:
             cursor.execute("""
                 SELECT ocid, display_name, shape_name, is_private,
-                       ip_addresses, lifecycle_state, region,
-                       compartment_ocid, is_deleted
+                       ip_addresses, min_bandwidth_mbps, max_bandwidth_mbps,
+                       lifecycle_state, region, compartment_ocid, is_deleted
                 FROM oci_load_balancer
                 WHERE user_id = %s
             """, (user_id,))
         else:
             cursor.execute("""
                 SELECT ocid, display_name, shape_name, is_private,
-                       ip_addresses, lifecycle_state, region,
-                       compartment_ocid, is_deleted
+                       ip_addresses, min_bandwidth_mbps, max_bandwidth_mbps,
+                       lifecycle_state, region, compartment_ocid, is_deleted
                 FROM oci_load_balancer
                 WHERE user_id = %s AND is_deleted = FALSE
             """, (user_id,))
@@ -1055,15 +1059,15 @@ def get_all_load_balancers_for_user(user_id: int, include_deleted: bool = False)
     try:
         if include_deleted:
             cursor.execute("""
-                SELECT ocid, display_name, shape_name, is_private, lifecycle_state, 
-                       compartment_ocid, is_deleted
+                SELECT ocid, display_name, shape_name, is_private, min_bandwidth_mbps,
+                       max_bandwidth_mbps, lifecycle_state, compartment_ocid, is_deleted
                 FROM oci_load_balancer
                 WHERE user_id = %s
             """, (user_id,))
         else:
             cursor.execute("""
-                SELECT ocid, display_name, shape_name, is_private, lifecycle_state, 
-                       compartment_ocid, is_deleted
+                SELECT ocid, display_name, shape_name, is_private, min_bandwidth_mbps,
+                       max_bandwidth_mbps, lifecycle_state, compartment_ocid, is_deleted
                 FROM oci_load_balancer
                 WHERE user_id = %s AND is_deleted = FALSE
             """, (user_id,))
@@ -1076,6 +1080,8 @@ def get_all_load_balancers_for_user(user_id: int, include_deleted: bool = False)
                 'display_name': row['display_name'],
                 'shape_name': row['shape_name'],
                 'is_private': row['is_private'],
+                'min_bandwidth_mbps': row['min_bandwidth_mbps'],
+                'max_bandwidth_mbps': row['max_bandwidth_mbps'],
                 'lifecycle_state': row['lifecycle_state'],
                 'compartment_ocid': row['compartment_ocid'],
                 'is_deleted': bool(row['is_deleted'])

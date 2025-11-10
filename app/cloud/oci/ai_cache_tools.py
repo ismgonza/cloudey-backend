@@ -6,6 +6,7 @@ instead of making expensive OCI API calls.
 """
 
 import logging
+import os
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -20,6 +21,39 @@ from app.db.resource_crud import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Check if demo mode is active
+DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() == "true"
+
+# Import demo mode functions if active
+if DEMO_MODE:
+    from app.demo_middleware import anonymize_compartment, anonymize_resource_name, obfuscate_cost
+
+
+def anonymize_for_demo(data):
+    """Apply demo mode anonymization to tool outputs"""
+    if not DEMO_MODE:
+        return data
+    
+    if isinstance(data, dict):
+        result = {}
+        for key, value in data.items():
+            # Anonymize compartment names
+            if 'compartment' in key.lower():
+                result[key] = anonymize_compartment(value, ocid=data.get('compartment_ocid'))
+            # Anonymize resource names
+            elif any(keyword in key.lower() for keyword in ['name', 'resource_name', 'display_name']) and 'service' not in key.lower():
+                result[key] = anonymize_resource_name(value, ocid=data.get('resource_ocid') or data.get('ocid'))
+            # Obfuscate costs
+            elif 'cost' in key.lower() or 'amount' in key.lower() or 'total' in key.lower():
+                result[key] = obfuscate_cost(value) if isinstance(value, (int, float)) else value
+            else:
+                result[key] = anonymize_for_demo(value)
+        return result
+    elif isinstance(data, list):
+        return [anonymize_for_demo(item) for item in data]
+    else:
+        return data
 
 
 @tool
@@ -96,15 +130,33 @@ def query_cached_costs(
                 matched_names = [c['name'] for c in compartments if c['ocid'] in matching_compartment_ocids]
                 return f"No costs found in compartment '{', '.join(matched_names)}' for {month}. The compartment exists but has no recorded costs for this period."
         
-        # Filter by service if specified
+        # Filter by service if specified (handle both "Block Storage" and "BLOCK_STORAGE" formats)
         if service:
-            costs = [c for c in costs if c['service'].upper() == service.upper()]
+            # Normalize service name for comparison (remove spaces, underscores, make uppercase)
+            service_normalized = service.upper().replace(' ', '').replace('_', '')
+            costs = [c for c in costs if c['service'].upper().replace(' ', '').replace('_', '') == service_normalized]
         
         # Sort by cost descending
         costs = sorted(costs, key=lambda x: x['cost'], reverse=True)
         
         # Limit results
         costs = costs[:limit]
+        
+        # Enrich with resource names from inventory
+        from app.db.resource_crud import get_resource_by_ocid
+        for cost in costs:
+            resource_info = get_resource_by_ocid(cost['resource_ocid'])
+            if resource_info:
+                cost['resource_name'] = resource_info.get('resource_name', 'Unknown')
+                cost['compartment_name'] = compartment_map.get(resource_info.get('compartment_ocid', ''), 'Unknown')
+            else:
+                # Use shortened OCID if not in inventory
+                ocid = cost['resource_ocid']
+                cost['resource_name'] = ocid[-20:] if ocid.startswith('ocid1.') else ocid
+                cost['compartment_name'] = 'Unknown'
+        
+        # Apply demo mode anonymization to costs data
+        costs = anonymize_for_demo(costs)
         
         # Calculate total
         total_cost = sum(c['cost'] for c in costs)
@@ -119,11 +171,9 @@ def query_cached_costs(
         
         result += "Top Resources:\n"
         for i, cost in enumerate(costs[:20], 1):
-            resource = cost['resource_ocid']
-            # Shorten OCID for readability
-            if resource.startswith('ocid1.'):
-                resource = resource[-20:]
-            result += f"{i}. {cost['service']}: {resource} = ${cost['cost']:,.2f}\n"
+            name = cost.get('resource_name', 'Unknown')
+            comp = cost.get('compartment_name', 'Unknown')
+            result += f"{i}. {cost['service']}: {name} ({comp}) = ${cost['cost']:,.2f}\n"
         
         return result
     
@@ -153,15 +203,15 @@ def query_resource_inventory(
         user_id: User ID
         resource_type: Type of resource ("instance", "volume", "bucket", or None for all)
         lifecycle_state: Filter by state (e.g., "RUNNING", "STOPPED", "AVAILABLE")
-        compartment_name: Compartment name (supports fuzzy matching - e.g., "bby_prod", "bby production", "bby prod" all work)
+        compartment_name: Compartment name (supports fuzzy matching - e.g., "production", "prod staging", "staging" all work)
     
     Returns:
         Formatted string with resource inventory showing names, states, shapes, and compartments
     
     Examples:
-        - query_resource_inventory(1, "instance", None, "bby_prod") - list all instances in bby_prod
+        - query_resource_inventory(1, "instance", None, "production") - list all instances in production
         - query_resource_inventory(1, "instance", "STOPPED", None) - list all stopped instances
-        - query_resource_inventory(1, None, None, "production") - list all resources in production compartment
+        - query_resource_inventory(1, None, None, "staging") - list all resources in staging compartment
     """
     try:
         logger.info(f"🔍 AI querying resource inventory: type={resource_type}, state={lifecycle_state}")
@@ -243,6 +293,9 @@ def query_resource_inventory(
             
             # Filter results to only resources in matching compartments
             results = [r for r in results if r['compartment'] in matching_compartment_ocids]
+        
+        # Apply demo mode anonymization to results
+        results = anonymize_for_demo(results)
         
         # Format response
         result = f"📦 Resource Inventory\n"
@@ -383,6 +436,282 @@ def analyze_cost_trends(
 
 
 @tool
+def get_resources_with_costs(
+    user_id: int,
+    resource_type: str,
+    compartment_name: Optional[str] = None,
+    months: str = None,
+    limit: int = 100
+) -> str:
+    """
+    Get resources of a specific type with their costs across multiple months.
+    Perfect for queries like "instances in compartment X with their costs".
+    
+    Args:
+        user_id: User ID
+        resource_type: Type of resource ("instance", "volume", "bucket")
+        compartment_name: Optional compartment name (supports fuzzy matching)
+        months: Comma-separated months (e.g., "2025-09,2025-10") - defaults to last 2 months
+        limit: Maximum number of resources to return (default: 100)
+    
+    Returns:
+        Formatted string with resources and their costs per month
+    
+    Examples:
+        - get_resources_with_costs(1, "instance", "production", "2025-09,2025-10", 50)
+        - get_resources_with_costs(1, "volume", "staging", "2025-10", 20)
+    """
+    try:
+        logger.info(f"🔍 AI getting resources with costs: type={resource_type}, compartment={compartment_name}")
+        
+        # Get compartment mapping
+        from app.db.resource_crud import get_all_compartments
+        compartments = get_all_compartments(user_id)
+        compartment_map = {c['ocid']: c['name'] for c in compartments}
+        
+        # Find matching compartments if specified
+        matching_compartment_ocids = []
+        if compartment_name:
+            for comp in compartments:
+                comp_name = comp.get('name', '').lower()
+                search_name = compartment_name.lower().replace(' ', '_').replace('-', '_')
+                if search_name in comp_name or comp_name in search_name:
+                    matching_compartment_ocids.append(comp['ocid'])
+            
+            if not matching_compartment_ocids:
+                return f"No compartment found matching '{compartment_name}'"
+        
+        # Get resources using inventory tool
+        resources = []
+        if resource_type.lower() == "instance":
+            from app.db.resource_crud import get_all_instances_for_user
+            instances = get_all_instances_for_user(user_id)
+            for inst in instances:
+                comp_ocid = inst.get('compartment_ocid', '')
+                if not matching_compartment_ocids or comp_ocid in matching_compartment_ocids:
+                    resources.append({
+                        'ocid': inst['ocid'],
+                        'name': inst['display_name'],
+                        'type': 'Compute',
+                        'compartment_ocid': comp_ocid,
+                        'compartment_name': compartment_map.get(comp_ocid, 'Unknown'),
+                        'state': inst.get('lifecycle_state', 'Unknown'),
+                        'shape': inst.get('shape', 'Unknown')
+                    })
+        elif resource_type.lower() == "volume":
+            from app.db.resource_crud import get_all_volumes_for_user
+            volumes = get_all_volumes_for_user(user_id)
+            for vol in volumes:
+                comp_ocid = vol.get('compartment_ocid', '')
+                if not matching_compartment_ocids or comp_ocid in matching_compartment_ocids:
+                    resources.append({
+                        'ocid': vol['ocid'],
+                        'name': vol['display_name'],
+                        'type': 'Block Storage',
+                        'compartment_ocid': comp_ocid,
+                        'compartment_name': compartment_map.get(comp_ocid, 'Unknown'),
+                        'state': vol.get('lifecycle_state', 'Unknown'),
+                        'size': f"{vol.get('size_in_gbs', 0)} GB"
+                    })
+        elif resource_type.lower() == "bucket":
+            from app.db.resource_crud import get_all_buckets_for_user
+            buckets = get_all_buckets_for_user(user_id)
+            for bucket in buckets:
+                comp_ocid = bucket.get('compartment_ocid', '')
+                if not matching_compartment_ocids or comp_ocid in matching_compartment_ocids:
+                    resources.append({
+                        'ocid': bucket['ocid'],
+                        'name': bucket['name'],
+                        'type': 'Object Storage',
+                        'compartment_ocid': comp_ocid,
+                        'compartment_name': compartment_map.get(comp_ocid, 'Unknown'),
+                        'namespace': bucket.get('namespace', 'Unknown')
+                    })
+        
+        if not resources:
+            return f"No {resource_type}s found" + (f" in compartment '{compartment_name}'" if compartment_name else "")
+        
+        # Limit resources
+        resources = resources[:limit]
+        
+        # Parse months (default to last 2 months if not specified)
+        if not months:
+            from datetime import datetime, timedelta
+            today = datetime.now()
+            month1 = (today.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+            month2 = today.strftime("%Y-%m")
+            month_list = [month1, month2]
+        else:
+            month_list = [m.strip() for m in months.split(',')]
+        
+        # Get costs for these resources
+        cost_cache = get_cost_cache()
+        resource_costs = {r['ocid']: {m: 0.0 for m in month_list} for r in resources}
+        
+        for month in month_list:
+            costs = cost_cache.get_costs(month, user_id)
+            if costs:
+                for cost in costs:
+                    ocid = cost['resource_ocid']
+                    if ocid in resource_costs:
+                        resource_costs[ocid][month] = cost['cost']
+        
+        # Apply demo mode anonymization to resources
+        resources = anonymize_for_demo(resources)
+        # Anonymize costs in resource_costs dict
+        if DEMO_MODE:
+            resource_costs = {k: {m: obfuscate_cost(v) for m, v in months.items()} for k, months in resource_costs.items()}
+        
+        # Format response
+        result = f"📦 {len(resources)} {resource_type.title()}(s)"
+        if compartment_name:
+            result += f" in {compartment_name}"
+        result += f"\nCosts for: {', '.join(month_list)}\n\n"
+        
+        for i, resource in enumerate(resources, 1):
+            ocid = resource['ocid']
+            costs = resource_costs[ocid]
+            total_cost = sum(costs.values())
+            
+            result += f"{i}. {resource['name']}\n"
+            result += f"   Compartment: {resource['compartment_name']}\n"
+            
+            if 'state' in resource:
+                result += f"   State: {resource['state']}\n"
+            if 'shape' in resource:
+                result += f"   Shape: {resource['shape']}\n"
+            if 'size' in resource:
+                result += f"   Size: {resource['size']}\n"
+            
+            result += f"   Costs: "
+            month_costs_str = ", ".join([f"{m}: ${costs[m]:,.2f}" for m in month_list])
+            result += month_costs_str
+            result += f" (Total: ${total_cost:,.2f})\n\n"
+        
+        return result
+    
+    except Exception as e:
+        logger.error(f"Error getting resources with costs: {str(e)}")
+        return f"Error getting resources with costs: {str(e)}"
+
+
+@tool
+def get_volumes_with_details(
+    user_id: int,
+    month: str,
+    top_n: int = 10,
+    compartment_name: Optional[str] = None
+) -> str:
+    """
+    Get block volumes with their costs, size, state, and attachment status.
+    Perfect for queries about expensive volumes or volume utilization.
+    
+    Args:
+        user_id: User ID
+        month: Month in YYYY-MM format (e.g., "2025-10")
+        top_n: Number of volumes to return (default: 10)
+        compartment_name: Optional compartment filter
+    
+    Returns:
+        Formatted table with volume details
+    
+    Example:
+        get_volumes_with_details(1, "2025-10", 10, "production")
+    """
+    try:
+        logger.info(f"🔍 AI getting volume details for month={month}, top_n={top_n}")
+        
+        # Get costs for block storage
+        cost_cache = get_cost_cache()
+        costs = cost_cache.get_costs(month, user_id)
+        
+        if not costs:
+            return f"No cost data found for {month}"
+        
+        # Filter to Block Storage only and normalize service name
+        costs = [c for c in costs if 'block' in c['service'].lower() or 'storage' in c['service'].lower()]
+        
+        # Get compartments for filtering
+        from app.db.resource_crud import get_all_compartments, get_all_volumes_for_user
+        compartments = get_all_compartments(user_id)
+        compartment_map = {c['ocid']: c['name'] for c in compartments}
+        
+        # Get all volumes
+        volumes = get_all_volumes_for_user(user_id)
+        volume_map = {v['ocid']: v for v in volumes}
+        
+        # Filter by compartment if specified
+        if compartment_name:
+            matching_compartment_ocids = []
+            for comp in compartments:
+                comp_name = comp.get('name', '').lower()
+                search_name = compartment_name.lower().replace(' ', '_').replace('-', '_')
+                if search_name in comp_name or comp_name in search_name:
+                    matching_compartment_ocids.append(comp['ocid'])
+            
+            if not matching_compartment_ocids:
+                return f"No compartment found matching '{compartment_name}'"
+            
+            # Filter volumes to matching compartments
+            volumes = [v for v in volumes if v.get('compartment_ocid') in matching_compartment_ocids]
+            volume_map = {v['ocid']: v for v in volumes}
+        
+        # Match costs with volumes
+        volume_costs = []
+        for cost in costs:
+            ocid = cost['resource_ocid']
+            if ocid in volume_map:
+                vol = volume_map[ocid]
+                volume_costs.append({
+                    'name': vol.get('display_name', 'Unknown'),
+                    'cost': cost['cost'],
+                    'size_gb': vol.get('size_in_gbs', 0),
+                    'state': vol.get('lifecycle_state', 'Unknown'),
+                    'compartment': compartment_map.get(vol.get('compartment_ocid'), 'Unknown'),
+                    'ocid': ocid
+                })
+        
+        if not volume_costs:
+            return f"No block volumes found with costs for {month}"
+        
+        # Sort by cost and get top N
+        volume_costs.sort(key=lambda x: x['cost'], reverse=True)
+        volume_costs = volume_costs[:top_n]
+        
+        # Apply demo mode anonymization to volume data
+        volume_costs = anonymize_for_demo(volume_costs)
+        
+        # Calculate total
+        total_cost = sum(v['cost'] for v in volume_costs)
+        
+        # Format as table
+        result = f"📊 Top {len(volume_costs)} Block Volumes by Cost ({month})\n\n"
+        result += f"Total Cost: ${total_cost:,.2f}\n\n"
+        result += "```\n"
+        result += f"{'#':<4} {'Volume Name':<40} {'Compartment':<20} {'Size':<10} {'State':<12} {'Cost/Month':<12}\n"
+        result += "=" * 100 + "\n"
+        
+        for i, vol in enumerate(volume_costs, 1):
+            name = vol['name'][:38] if len(vol['name']) > 38 else vol['name']
+            comp = vol['compartment'][:18] if len(vol['compartment']) > 18 else vol['compartment']
+            size = f"{vol['size_gb']} GB"
+            state = vol['state']
+            cost = f"${vol['cost']:,.2f}"
+            
+            result += f"{i:<4} {name:<40} {comp:<20} {size:<10} {state:<12} {cost:<12}\n"
+        
+        result += "```\n\n"
+        result += "**Note**: Costs shown are for the specified month only.\n"
+        result += "**Attachment Status**: Check the 'State' column - 'AVAILABLE' means not attached, others may be attached.\n"
+        
+        return result
+    
+    except Exception as e:
+        logger.error(f"Error getting volume details: {str(e)}")
+        return f"Error getting volume details: {str(e)}"
+
+
+@tool
 def get_top_cost_drivers(
     user_id: int,
     month: str,
@@ -423,6 +752,25 @@ def get_top_cost_drivers(
         # Get top N
         top_costs = costs[:top_n]
         
+        # Enrich with resource names from inventory
+        from app.db.resource_crud import get_resource_by_ocid, get_all_compartments
+        compartments = get_all_compartments(user_id)
+        compartment_map = {c['ocid']: c['name'] for c in compartments}
+        
+        for cost in top_costs:
+            resource_info = get_resource_by_ocid(cost['resource_ocid'])
+            if resource_info:
+                cost['resource_name'] = resource_info.get('resource_name', 'Unknown')
+                cost['compartment_name'] = compartment_map.get(resource_info.get('compartment_ocid', ''), 'Unknown')
+            else:
+                # Use shortened OCID if not in inventory
+                ocid = cost['resource_ocid']
+                cost['resource_name'] = ocid[-20:] if ocid.startswith('ocid1.') else ocid
+                cost['compartment_name'] = 'Unknown'
+        
+        # Apply demo mode anonymization to top costs data
+        top_costs = anonymize_for_demo(top_costs)
+        
         # Calculate total and percentage
         total_cost = sum(c['cost'] for c in costs)
         top_total = sum(c['cost'] for c in top_costs)
@@ -434,19 +782,14 @@ def get_top_cost_drivers(
         result += f"Top {top_n} Cost: ${top_total:,.2f} ({top_percentage:.1f}% of total)\n\n"
         
         for i, cost in enumerate(top_costs, 1):
-            resource = cost['resource_ocid']
+            name = cost.get('resource_name', 'Unknown')
             service = cost['service']
+            comp = cost.get('compartment_name', 'Unknown')
             amount = cost['cost']
             pct = (amount / total_cost * 100) if total_cost > 0 else 0
             
-            # Shorten OCID for readability
-            if resource.startswith('ocid1.'):
-                resource_display = f"...{resource[-20:]}"
-            else:
-                resource_display = resource
-            
-            result += f"{i}. {service}\n"
-            result += f"   Resource: {resource_display}\n"
+            result += f"{i}. {service}: {name}\n"
+            result += f"   Compartment: {comp}\n"
             result += f"   Cost: ${amount:,.2f} ({pct:.1f}% of total)\n\n"
         
         return result

@@ -879,6 +879,62 @@ def create_oci_tools(user_id: int) -> List:
             "min_cost": min_cost
         })
     
+    @tool
+    def get_resources_with_costs_tool(
+        resource_type: str,
+        compartment_name: str = None,
+        months: str = None,
+        limit: int = 100
+    ) -> str:
+        """🎯 PERFECT FOR: "instances in X with their costs", "volumes with monthly costs"
+        
+        Get specific resources (instances, volumes, buckets) with their costs across months.
+        This tool joins inventory data with cost data automatically.
+        
+        Args:
+            resource_type: "instance", "volume", or "bucket"
+            compartment_name: Optional compartment name (supports fuzzy matching)
+            months: Comma-separated months (e.g., "2025-09,2025-10") - defaults to last 2 months
+            limit: Maximum number of resources (default: 100)
+        
+        Examples:
+            - get_resources_with_costs_tool("instance", "production", "2025-09,2025-10", 50)
+            - get_resources_with_costs_tool("volume", "staging", "2025-10", 20)
+        """
+        return ai_cache_tools.get_resources_with_costs.invoke({
+            "user_id": user_id,
+            "resource_type": resource_type,
+            "compartment_name": compartment_name,
+            "months": months,
+            "limit": limit
+        })
+    
+    @tool
+    def get_volumes_with_details_tool(
+        month: str,
+        top_n: int = 10,
+        compartment_name: str = None
+    ) -> str:
+        """📦 PERFECT FOR: "top expensive volumes", "volumes with attachment status", "volume details"
+        
+        Get block volumes with costs, size, state, and attachment status in a formatted table.
+        
+        Args:
+            month: Month in YYYY-MM format (e.g., "2025-10")
+            top_n: Number of top volumes to show (default: 10)
+            compartment_name: Optional compartment filter
+        
+        Examples:
+            - get_volumes_with_details_tool("2025-10", 10)
+            - get_volumes_with_details_tool("2025-10", 20, "production")
+        """
+        return ai_cache_tools.get_volumes_with_details.invoke({
+            "user_id": user_id,
+            "month": month,
+            "top_n": top_n,
+            "compartment_name": compartment_name
+        })
+    
     # Return all tools
     return [
         # AI Cache Tools (NEW - PRIORITIZE THESE!)
@@ -886,6 +942,8 @@ def create_oci_tools(user_id: int) -> List:
         query_resource_inventory_tool,
         analyze_cost_trends_tool,
         get_top_cost_drivers_tool,
+        get_resources_with_costs_tool,
+        get_volumes_with_details_tool,  # NEW!
         # Compartment tools
         list_oci_compartments,
         # Cost tools

@@ -140,6 +140,8 @@ async def sync_user_resources(user_id: int, force: bool = False) -> Dict[str, in
                         'shape': inst.get('shape'),
                         'lifecycle_state': inst.get('lifecycle_state'),
                         'availability_domain': inst.get('availability_domain'),
+                        'vcpus': inst.get('vcpus'),  # Added
+                        'memory_in_gbs': inst.get('memory_in_gbs'),  # Added
                         'region': region,
                         'time_created': inst.get('time_created')
                     }
@@ -432,6 +434,8 @@ async def sync_user_resources(user_id: int, force: bool = False) -> Dict[str, in
                         'shape_name': lb.get('shape_name'),
                         'is_private': lb.get('is_private'),
                         'ip_addresses': lb.get('ip_addresses', []),
+                        'min_bandwidth_mbps': lb.get('min_bandwidth_mbps'),
+                        'max_bandwidth_mbps': lb.get('max_bandwidth_mbps'),
                         'lifecycle_state': lb.get('lifecycle_state'),
                         'region': region,
                         'time_created': lb.get('time_created')

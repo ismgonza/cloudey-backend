@@ -188,6 +188,8 @@ CREATE TABLE IF NOT EXISTS oci_load_balancer (
     shape_name TEXT,
     is_private BOOLEAN,
     ip_addresses JSONB,
+    min_bandwidth_mbps INTEGER,
+    max_bandwidth_mbps INTEGER,
     lifecycle_state TEXT,
     region TEXT,
     time_created TIMESTAMP,
@@ -233,35 +235,16 @@ CREATE INDEX idx_sessions_updated ON sessions(updated_at DESC);
 -- ============================================================================
 -- LANGGRAPH CHECKPOINTS (for conversation state)
 -- ============================================================================
-CREATE TABLE IF NOT EXISTS checkpoints (
-    thread_id TEXT NOT NULL,
-    checkpoint_ns TEXT NOT NULL DEFAULT '',
-    checkpoint_id TEXT NOT NULL,
-    parent_checkpoint_id TEXT,
-    type TEXT,
-    checkpoint BYTEA,
-    metadata BYTEA,
-    PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
-);
-
-CREATE INDEX idx_checkpoints_thread ON checkpoints(thread_id);
-
--- ============================================================================
--- LANGGRAPH WRITES (for conversation writes)
--- ============================================================================
-CREATE TABLE IF NOT EXISTS writes (
-    thread_id TEXT NOT NULL,
-    checkpoint_ns TEXT NOT NULL DEFAULT '',
-    checkpoint_id TEXT NOT NULL,
-    task_id TEXT NOT NULL,
-    idx INTEGER NOT NULL,
-    channel TEXT NOT NULL,
-    type TEXT,
-    value BYTEA,
-    PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
-);
-
-CREATE INDEX idx_writes_thread ON writes(thread_id, checkpoint_ns, checkpoint_id);
+-- NOTE: LangGraph checkpoint tables are NOT created here!
+-- They must be created by running: uv run python setup_langgraph.py
+-- 
+-- This is because LangGraph's setup() uses CREATE INDEX CONCURRENTLY which
+-- cannot run inside a transaction block. The setup script uses autocommit mode.
+--
+-- Tables created by setup script:
+--   - checkpoints
+--   - checkpoint_blobs  
+--   - checkpoint_writes
 
 -- ============================================================================
 -- OCI METRICS (for monitoring data)

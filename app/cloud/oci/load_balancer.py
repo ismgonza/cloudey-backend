@@ -59,6 +59,15 @@ class LoadBalancerClient:
                 if hasattr(lb, 'ip_addresses') and lb.ip_addresses:
                     ip_addresses = [ip.ip_address for ip in lb.ip_addresses if hasattr(ip, 'ip_address')]
                 
+                # Extract bandwidth configuration (for flexible shapes)
+                min_bandwidth_mbps = None
+                max_bandwidth_mbps = None
+                if hasattr(lb, 'shape_details') and lb.shape_details:
+                    if hasattr(lb.shape_details, 'minimum_bandwidth_in_mbps'):
+                        min_bandwidth_mbps = lb.shape_details.minimum_bandwidth_in_mbps
+                    if hasattr(lb.shape_details, 'maximum_bandwidth_in_mbps'):
+                        max_bandwidth_mbps = lb.shape_details.maximum_bandwidth_in_mbps
+                
                 load_balancers.append({
                     "id": lb.id,
                     "display_name": lb.display_name,
@@ -67,7 +76,9 @@ class LoadBalancerClient:
                     "is_private": lb.is_private,
                     "ip_addresses": ip_addresses,
                     "lifecycle_state": lb.lifecycle_state,
-                    "time_created": str(lb.time_created) if lb.time_created else None
+                    "time_created": str(lb.time_created) if lb.time_created else None,
+                    "min_bandwidth_mbps": min_bandwidth_mbps,
+                    "max_bandwidth_mbps": max_bandwidth_mbps
                 })
             
             return load_balancers

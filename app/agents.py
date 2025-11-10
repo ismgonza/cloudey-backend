@@ -31,8 +31,8 @@ async def get_checkpointer():
         await _connection_pool.open()
         
         # Create PostgreSQL checkpointer
-        # Note: We skip setup() because tables are already created via init_schema.sql
-        # and setup() uses CREATE INDEX CONCURRENTLY which can't run in a transaction
+        # Note: We skip setup() because it uses CREATE INDEX CONCURRENTLY which can't run in a transaction
+        # The tables (checkpoints, checkpoint_blobs, checkpoint_writes) are created by setup_langgraph.py
         _checkpointer = AsyncPostgresSaver(_connection_pool)
     return _checkpointer
 
@@ -174,18 +174,32 @@ async def get_conversation_history(thread_id: str):
     Returns:
         List of messages in the conversation
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
     try:
+        logger.info(f"📖 Fetching conversation history for thread_id: {thread_id}")
+        
+        # Ensure checkpointer is initialized
         checkpointer = await get_checkpointer()
         config = {"configurable": {"thread_id": thread_id}}
         
         # Get the checkpoint state
+        logger.debug(f"Calling checkpointer.aget with config: {config}")
         checkpoint = await checkpointer.aget(config)
+        logger.debug(f"Checkpoint result: {type(checkpoint)}")
         
-        if not checkpoint or not checkpoint.get("channel_values"):
+        if not checkpoint:
+            logger.info(f"No checkpoint found for thread_id: {thread_id}")
+            return []
+        
+        if not checkpoint.get("channel_values"):
+            logger.info(f"No channel_values in checkpoint for thread_id: {thread_id}")
             return []
         
         # Extract messages from the state
         messages_data = checkpoint["channel_values"].get("messages", [])
+        logger.info(f"Found {len(messages_data)} messages in checkpoint")
         
         # Convert to simple dict format for API response
         result = []
@@ -201,9 +215,10 @@ async def get_conversation_history(thread_id: str):
                 if not (hasattr(msg, "tool_calls") and msg.tool_calls):
                     result.append({"role": "assistant", "content": msg.content})
         
+        logger.info(f"✅ Returning {len(result)} messages for thread_id: {thread_id}")
         return result
     except Exception as e:
-        print(f"Error fetching conversation history: {str(e)}")
+        logger.error(f"❌ Error fetching conversation history for {thread_id}: {str(e)}", exc_info=True)
         return []
 
 
@@ -213,20 +228,52 @@ async def delete_conversation_history(thread_id: str):
     Args:
         thread_id: Thread ID (session_id) to delete
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
     try:
-        checkpointer = await get_checkpointer()
+        logger.info(f"🗑️ Deleting conversation history for thread_id: {thread_id}")
         
-        # Access the underlying aiosqlite connection
-        conn = checkpointer.conn
+        # Ensure checkpointer and connection pool are initialized
+        await get_checkpointer()
         
-        # Delete all checkpoints for this thread
-        await conn.execute(
-            "DELETE FROM checkpoints WHERE thread_id = ?",
-            (thread_id,)
-        )
-        await conn.commit()
+        global _connection_pool
+        
+        if not _connection_pool:
+            logger.error("Connection pool not initialized!")
+            raise RuntimeError("Connection pool not initialized")
+        
+        # Use the connection pool to execute the delete
+        async with _connection_pool.connection() as conn:
+            async with conn.cursor() as cur:
+                # Delete all checkpoint-related data for this thread
+                logger.debug(f"Deleting checkpoint_writes for {thread_id}")
+                result1 = await cur.execute(
+                    "DELETE FROM checkpoint_writes WHERE thread_id = %s",
+                    (thread_id,)
+                )
+                writes_deleted = cur.rowcount
+                
+                logger.debug(f"Deleting checkpoint_blobs for {thread_id}")
+                result2 = await cur.execute(
+                    "DELETE FROM checkpoint_blobs WHERE thread_id = %s",
+                    (thread_id,)
+                )
+                blobs_deleted = cur.rowcount
+                
+                logger.debug(f"Deleting checkpoints for {thread_id}")
+                result3 = await cur.execute(
+                    "DELETE FROM checkpoints WHERE thread_id = %s",
+                    (thread_id,)
+                )
+                checkpoints_deleted = cur.rowcount
+                
+                await conn.commit()
+                
+                logger.info(f"✅ Deleted conversation history for {thread_id}: "
+                          f"{checkpoints_deleted} checkpoints, {blobs_deleted} blobs, {writes_deleted} writes")
     except Exception as e:
-        print(f"Error deleting conversation history: {str(e)}")
+        logger.error(f"❌ Error deleting conversation history for {thread_id}: {str(e)}", exc_info=True)
         raise
 
 

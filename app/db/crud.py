@@ -107,7 +107,7 @@ def get_oci_config_by_user_id(user_id: int):
 # Session Operations
 # ============================================================================
 
-def create_or_update_session(session_id: str, user_id: int, title: str = None) -> int:
+def create_or_update_session(session_id: str, user_id: int, title: str = None) -> str:
     """Create or update a session for a user.
     
     Args:
@@ -116,14 +116,14 @@ def create_or_update_session(session_id: str, user_id: int, title: str = None) -
         title: Optional title for the session (e.g., first message)
     
     Returns:
-        Session ID (database primary key)
+        Session ID (same as input session_id)
     """
     conn = get_db_connection()
     cursor = conn.cursor()
     
     try:
         # Check if session exists
-        cursor.execute("SELECT id FROM sessions WHERE session_id = %s", (session_id,))
+        cursor.execute("SELECT id FROM sessions WHERE id = %s", (session_id,))
         existing = cursor.fetchone()
         
         if existing:
@@ -131,14 +131,14 @@ def create_or_update_session(session_id: str, user_id: int, title: str = None) -
             cursor.execute("""
                 UPDATE sessions 
                 SET updated_at = CURRENT_TIMESTAMP, title = COALESCE(%s, title)
-                WHERE session_id = %s
+                WHERE id = %s
             """, (title, session_id))
             conn.commit()
-            return existing["id"]
+            return session_id
         else:
             # Create new session
             cursor.execute("""
-                INSERT INTO sessions (session_id, user_id, title)
+                INSERT INTO sessions (id, user_id, title)
                 VALUES (%s, %s, %s)
                 RETURNING id
             """, (session_id, user_id, title))
@@ -164,7 +164,7 @@ def get_sessions_by_user(user_id: int, limit: int = 50):
     
     try:
         cursor.execute("""
-            SELECT id, session_id, user_id, title, created_at, updated_at
+            SELECT id, user_id, title, created_at, updated_at
             FROM sessions
             WHERE user_id = %s
             ORDER BY updated_at DESC
@@ -177,7 +177,7 @@ def get_sessions_by_user(user_id: int, limit: int = 50):
 
 
 def get_session_by_id(session_id: str):
-    """Get a session by its session_id.
+    """Get a session by its id.
     
     Args:
         session_id: Session identifier
@@ -190,9 +190,9 @@ def get_session_by_id(session_id: str):
     
     try:
         cursor.execute("""
-            SELECT id, session_id, user_id, title, created_at, updated_at
+            SELECT id, user_id, title, created_at, updated_at
             FROM sessions
-            WHERE session_id = %s
+            WHERE id = %s
         """, (session_id,))
         
         return cursor.fetchone()
@@ -213,7 +213,7 @@ def delete_session(session_id: str):
     cursor = conn.cursor()
     
     try:
-        cursor.execute("DELETE FROM sessions WHERE session_id = %s", (session_id,))
+        cursor.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
         conn.commit()
         return cursor.rowcount
     finally:

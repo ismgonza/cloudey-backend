@@ -258,25 +258,34 @@ async def get_detailed_costs(user_id: int, force_refresh: bool = False) -> Dict[
                 items = response.data.items if response.data else []
                 logger.debug(f"Received {len(items)} cost items from OCI for {month_name}")
                 
-                # Save to hybrid cache (Redis for current month, SQLite for historical)
-                cache_records = []
+                # Aggregate DAILY costs into MONTHLY totals before caching
+                # OCI API returns DAILY granularity, but we want monthly totals
+                cost_aggregates = defaultdict(lambda: {'service': '', 'cost': 0.0})
+                
                 for item in items:
                     service_name = getattr(item, 'service', 'Unknown')
                     resource_id = getattr(item, 'resource_id', None)
                     computed_amount = getattr(item, 'computed_amount', None)
                     cost = float(computed_amount) if computed_amount is not None else 0.0
                     
-                    if resource_id:  # Only cache resource-level costs
-                        cache_records.append({
-                            'resource_ocid': resource_id,
-                            'service': service_name,
-                            'cost': cost
-                        })
+                    if resource_id:  # Only aggregate resource-level costs
+                        cost_aggregates[resource_id]['service'] = service_name
+                        cost_aggregates[resource_id]['cost'] += cost  # SUM daily costs
                 
-                # Save to hybrid cache
+                # Convert aggregates to cache records
+                cache_records = [
+                    {
+                        'resource_ocid': resource_id,
+                        'service': data['service'],
+                        'cost': data['cost']
+                    }
+                    for resource_id, data in cost_aggregates.items()
+                ]
+                
+                # Save aggregated monthly totals to hybrid cache
                 if cache_records:
                     cost_cache.save_costs(month_key, user_id, cache_records)
-                    logger.info(f"💾 Saved {len(cache_records)} cost records to hybrid cache for {month_name}")
+                    logger.info(f"💾 Saved {len(cache_records)} aggregated cost records to hybrid cache for {month_name} (from {len(items)} daily records)")
             
             # Process items for aggregation
             logger.debug(f"Processing {len(items)} cost items for aggregation")

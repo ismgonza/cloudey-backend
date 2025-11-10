@@ -437,9 +437,26 @@ backend/app/db/init_schema.sql
 ```
 
 This file is mounted as a Docker init script and creates:
-- All tables (users, oci_*, checkpoints, writes)
+- All application tables (users, oci_*, sessions, metrics)
 - Indexes for performance
 - Foreign key constraints
+
+### LangGraph Checkpoint Tables Setup
+
+⚠️ **IMPORTANT**: LangGraph conversation checkpoint tables must be created separately:
+
+```bash
+# After starting docker-compose, run the setup script
+cd backend
+uv run python setup_langgraph.py
+```
+
+This creates the LangGraph tables with the correct schema:
+- `checkpoints` - Conversation state storage
+- `checkpoint_blobs` - Large channel values
+- `checkpoint_writes` - Pending writes
+
+**Why separate?** LangGraph's setup uses `CREATE INDEX CONCURRENTLY` which cannot run inside a transaction block. The setup script uses autocommit mode to handle this.
 
 ### Manual Schema Reset
 
@@ -451,6 +468,10 @@ docker-compose down -v
 
 # Start fresh
 docker-compose up -d
+
+# Re-run LangGraph setup
+cd backend
+uv run python setup_langgraph.py
 
 # Schema will be re-initialized automatically
 ```

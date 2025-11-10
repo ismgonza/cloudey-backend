@@ -16,6 +16,7 @@ from app.cache import get_cache, get_cost_cache
 from app.scheduler import start_scheduler, stop_scheduler, get_scheduler_status
 from app.cloud.oci.resource_sync import sync_user_resources
 from app.db.resource_crud import get_sync_stats
+from app.demo_middleware import DemoModeMiddleware, DEMO_MODE
 
 # Setup logging with DEBUG level
 setup_logging(level="DEBUG")
@@ -65,6 +66,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add Demo Mode Middleware (anonymizes ALL responses when DEMO_MODE=true)
+app.add_middleware(DemoModeMiddleware)
+if DEMO_MODE:
+    logger.warning("=" * 80)
+    logger.warning("🎭 DEMO MODE ACTIVE - All API responses will be anonymized!")
+    logger.warning("=" * 80)
 
 
 class QueryRequest(BaseModel):
