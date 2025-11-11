@@ -275,7 +275,7 @@ async def get_detailed_costs(user_id: int, force_refresh: bool = False) -> Dict[
                 # Convert aggregates to cache records
                 cache_records = [
                     {
-                        'resource_ocid': resource_id,
+                            'resource_ocid': resource_id,
                         'service': data['service'],
                         'cost': data['cost']
                     }

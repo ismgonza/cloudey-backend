@@ -71,7 +71,7 @@ YOU MUST USE THESE TOOLS FIRST (they are INSTANT):
 4. **query_resource_inventory_tool(resource_type, lifecycle_state, compartment_name)**
    - For resource lists, instances by compartment, stopped instances, etc.
   - Supports fuzzy compartment matching (e.g., "prod", "production", "dev" all work)
-  - Examples:
+   - Examples:
     * "instances in prod" → query_resource_inventory_tool("instance", None, "prod")
      * "stopped instances" → query_resource_inventory_tool("instance", "STOPPED", None)
      * "all resources in production" → query_resource_inventory_tool(None, None, "production")

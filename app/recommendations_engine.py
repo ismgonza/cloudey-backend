@@ -158,7 +158,7 @@ async def generate_ai_recommendations(user_id: int) -> Dict[str, Any]:
                         "potential_savings": savings,
                         "lifecycle_state": inst.get('lifecycle_state', 'N/A'),
                         "ocid": inst.get('ocid', 'N/A')
-                    })
+                })
         
         # ========================================================================
         # 2. CALCULATE SERVICE COSTS & TIME PERIODS (needed for Quick Wins and AI analysis)
@@ -535,7 +535,7 @@ async def generate_ai_recommendations(user_id: int) -> Dict[str, Any]:
                 action_parts.append(f"• **{len(high_confidence)} confirmed low-traffic** (<10 Mbps peak)")
             if medium_confidence:
                 action_parts.append(f"• **{len(medium_confidence)} suspicious LBs** (no metrics)")
-            action_parts.append("")
+                action_parts.append("")
             action_parts.append("**Recommended Actions:**")
             action_parts.append("• Consolidate multiple low-bandwidth LBs into one")
             action_parts.append("• Switch to Network Load Balancer (cheaper for TCP/UDP)")
